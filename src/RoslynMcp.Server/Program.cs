@@ -53,8 +53,8 @@ try
 
     if (string.IsNullOrWhiteSpace(solutionPath))
     {
-        logger.Fatal("No solution found. Pass --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH, or start from a directory containing a .sln/.slnx file");
-        Console.Error.WriteLine("Error: No .sln/.slnx found. Use --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH, or start Claude from a directory containing a .sln/.slnx file.");
+        logger.Fatal("No solution found. Pass --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH, or start Claude inside a git repository that contains a .sln/.slnx file");
+        Console.Error.WriteLine("Error: No solution resolved from CWD. Use --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH, or start Claude inside a git repository that contains a .sln/.slnx file.");
         return 2;
     }
 
@@ -210,15 +210,21 @@ return 0;
 
 // ── Helpers ──
 
-// Walk up from startDir to find the git root (directory containing .git), then search for a solution within it.
+// Resolve the codebase from Claude's CWD: walk up from startDir to the enclosing git root
+// (".git" directory for a normal clone, or ".git" *file* for a worktree), then search for a
+// solution within that repo. If startDir is not inside any git repo, do NOT guess by scanning
+// unrelated trees — return null so the caller fails with a clear message. This is what stops the
+// server loading an arbitrary sibling solution when CWD is a multi-repo container directory.
 static string? DiscoverSolution(string startDir, Serilog.ILogger log)
 {
-    // Find git root
-    var gitRoot = startDir;
+    // Find git root by walking up. A worktree's ".git" is a file (gitdir: ...), not a directory,
+    // so accept either form — otherwise a worktree CWD would be misread as "not a repo".
+    string? gitRoot = null;
     var current = startDir;
     while (current != null)
     {
-        if (Directory.Exists(Path.Combine(current, ".git")))
+        var gitMarker = Path.Combine(current, ".git");
+        if (Directory.Exists(gitMarker) || File.Exists(gitMarker))
         {
             gitRoot = current;
             log.Information("Found git root: {GitRoot}", gitRoot);
@@ -227,6 +233,15 @@ static string? DiscoverSolution(string startDir, Serilog.ILogger log)
         var parent = Directory.GetParent(current)?.FullName;
         if (parent == null || parent == current) break;
         current = parent;
+    }
+
+    if (gitRoot == null)
+    {
+        log.Warning(
+            "CWD is not inside a git repository: {StartDir}. Refusing to scan unrelated directories. " +
+            "Start Claude inside the repository you want analyzed, or pass --solution-path / set ROSLYNMCP_SOLUTION_PATH.",
+            startDir);
+        return null;
     }
 
     // Search recursively within the git root for *.sln or *.slnx.
