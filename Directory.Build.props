@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AccelerateBuildsInVisualStudio>true</AccelerateBuildsInVisualStudio>
+    <RootNamespace>RoslynMcp</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Transitive dep of Microsoft.CodeAnalysis.Workspaces.MSBuild — build-time only, not shipped -->
+  <ItemGroup>
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-h4j7-5rxr-p4wc" />
+  </ItemGroup>
+</Project>

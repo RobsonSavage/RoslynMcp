@@ -1,0 +1,55 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup Label="Roslyn (compile-only in Core/Extension; full in Server)">
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.12.0" />
+    <PackageVersion Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.12.0" />
+    <PackageVersion Include="Microsoft.Build.Locator" Version="1.7.8" />
+  </ItemGroup>
+
+  <ItemGroup Label="MCP SDK">
+    <PackageVersion Include="ModelContextProtocol" Version="0.8.0-preview.1" />
+  </ItemGroup>
+
+  <ItemGroup Label="Hosting">
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.0-preview.1.25080.5" />
+  </ItemGroup>
+
+  <ItemGroup Label="Logging">
+    <PackageVersion Include="Serilog" Version="4.2.0" />
+    <PackageVersion Include="Serilog.Extensions.Hosting" Version="8.0.0" />
+    <PackageVersion Include="Serilog.Sinks.File" Version="6.0.0" />
+    <PackageVersion Include="Serilog.Sinks.Console" Version="6.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="SQLite">
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Async / polyfills">
+    <PackageVersion Include="Nito.AsyncEx.Coordination" Version="5.1.2" />
+    <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Serialization">
+    <PackageVersion Include="System.Text.Json" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Validation">
+    <PackageVersion Include="System.ComponentModel.Annotations" Version="5.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="VS Extension">
+    <PackageVersion Include="Microsoft.VisualStudio.SDK" Version="17.12.40392" />
+    <PackageVersion Include="EmbedIO" Version="3.5.2" />
+  </ItemGroup>
+
+  <ItemGroup Label="Testing">
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.1" />
+  </ItemGroup>
+</Project>
