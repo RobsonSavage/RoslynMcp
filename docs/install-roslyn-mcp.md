@@ -16,7 +16,7 @@ This configuration allows you to run multiple Claude Code instances simultaneous
 
 - .NET 10 SDK (or .NET runtime if using self-contained deployment)
 - Claude Code CLI
-- Built against `ModelContextProtocol` 2.0.0, which negotiates all five MCP spec revisions from `2024-11-05` through `2026-07-28`
+- Built against `ModelContextProtocol` 2.0.0, which accepts four MCP spec revisions through the `initialize` handshake (`2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`); `2026-07-28` is reached via `server/discover`, not `initialize`. A client proposing a revision newer than the handshake set gets `-32022` with the supported list in `error.data`, and must retry with one of them
 - PowerShell (for wrapper script)
 - Git (for worktree support)
 
