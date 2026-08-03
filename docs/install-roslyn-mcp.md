@@ -16,6 +16,7 @@ This configuration allows you to run multiple Claude Code instances simultaneous
 
 - .NET 10 SDK (or .NET runtime if using self-contained deployment)
 - Claude Code CLI
+- Built against `ModelContextProtocol` 2.0.0, which negotiates all five MCP spec revisions from `2024-11-05` through `2026-07-28`
 - PowerShell (for wrapper script)
 - Git (for worktree support)
 
