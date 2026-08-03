@@ -314,20 +314,61 @@ You should see multiple processes with different `--solution-path` arguments.
 
 ## Updating RoslynMcp
 
-When you pull server changes from git:
+Run every command from the root of your clone - `publish-local.ps1` resolves the project
+by relative path, so the working directory matters.
 
 ```powershell
-cd P:\qmaster\Solution\Tools\RoslynMcp
+# 1. Get the change
+git pull
+
+# 2. Close Claude Code, then confirm nothing still holds the exe
+Get-Process RoslynMcp.Server -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 3. Keep a rollback copy
+$d = Join-Path $env:LOCALAPPDATA 'RoslynMcp'
+if (Test-Path $d) { Copy-Item $d "$d.bak" -Recurse -Force }
+
+# 4. Clean the install directory, preserving log history
+if (Test-Path $d) {
+    Get-ChildItem $d -Force |
+        Where-Object { $_.Name -notin @('logs','extension.log') } |
+        Remove-Item -Recurse -Force
+}
+
+# 5. Republish
 .\publish-local.ps1
+
+# 6. Verify (see Check Version below)
+
+# 7. Restart all Claude Code instances
 ```
 
-Then restart all Claude Code instances to pick up the new version.
+Steps 2 and 4 are not optional:
+
+- **Step 2**: with Claude Code open the exe is locked, `dotnet publish` fails partway, and you
+  are left with new DLLs beside an old exe. That fails later, in confusing ways, rather than now.
+- **Step 4**: `dotnet publish -o` overwrites same-named files but never deletes orphans, so install
+  directories accumulate stale assemblies across upgrades.
+
+If step 5 fails, roll back with
+`Remove-Item $d -Recurse -Force; Rename-Item "$d.bak" $d`. Delete the `.bak` once step 6 looks right.
+
+Note that the `Microsoft.Extensions.Hosting 10.0.10` floor requires the .NET 10 SDK. An older SDK
+fails at restore.
 
 ### Check Version
 
+The server has no `--version` flag; it always resolves a solution first and exits non-zero if it
+cannot. Read the assembly versions from the install directory instead:
+
 ```powershell
-& "$env:LOCALAPPDATA\RoslynMcp\RoslynMcp.Server.exe" --version
+$d = Join-Path $env:LOCALAPPDATA 'RoslynMcp'
+Get-ChildItem $d -Filter 'ModelContextProtocol*.dll' |
+    Select-Object Name, @{n='Version';e={$_.VersionInfo.ProductVersion}}
 ```
+
+Both entries must read `2.0.0`. A `0.8.0-preview.1` here means the install is stale regardless of
+what `git log` says, because the running server loads from this directory, not from your clone.
 
 ---
 
