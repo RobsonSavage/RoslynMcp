@@ -79,21 +79,26 @@ public sealed class WorkspaceRootFollowTest : IDisposable
 
             var emptyRoot = Path.Combine(_targetRoot, "empty");
             Directory.CreateDirectory(Path.Combine(emptyRoot, ".git"));
-            var failedFollow = await SendRequestAsync(server, 5, "tools/call", new
+            var emptyFollow = await SendRequestAsync(server, 5, "tools/call", new
             {
                 name = "set_solution_root",
                 arguments = new { rootPath = emptyRoot, warmUp = false }
             }, 120_000);
-            Assert.True(failedFollow.GetProperty("result").GetProperty("isError").GetBoolean());
+            var emptyResult = emptyFollow.GetProperty("result");
+            Assert.False(emptyResult.TryGetProperty("isError", out var emptyError) && emptyError.GetBoolean());
+            var emptyBody = ParseToolBody(emptyFollow);
+            Assert.False(emptyBody.GetProperty("changed").GetBoolean());
+            Assert.Equal(Path.GetFullPath(targetSolution), emptyBody.GetProperty("solutionPath").GetString());
+            Assert.Contains("No .sln or .slnx", emptyBody.GetProperty("message").GetString());
 
-            var statusAfterFailure = await SendRequestAsync(server, 6, "tools/call", new
+            var statusAfterEmptyRoot = await SendRequestAsync(server, 6, "tools/call", new
             {
                 name = "get_workspace_status",
                 arguments = new { }
             }, 120_000);
             Assert.Equal(
                 Path.GetFullPath(targetSolution),
-                ParseToolBody(statusAfterFailure).GetProperty("solutionPath").GetString());
+                ParseToolBody(statusAfterEmptyRoot).GetProperty("solutionPath").GetString());
 
             var disabled = await SendRequestAsync(server, 7, "tools/call", new
             {

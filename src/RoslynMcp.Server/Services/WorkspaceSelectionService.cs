@@ -105,9 +105,20 @@ internal sealed class WorkspaceSelectionService : IWorkspaceSelectionService, ID
                     $"Could not discover a solution from workspace root: {fullRootPath}");
             }
 
+            // A root that holds no solution is the ordinary case for a Python repository or
+            // a notes tree, not a fault: the server goes on serving whatever it already had,
+            // which is what the bootstrap solution exists for. Report that path rather than
+            // an error, so a client asking where it is pointed gets an answer. With nothing
+            // loaded there is no true path to report, and it stays a failure.
             if (solutionPath == null)
-                return Result<SetSolutionRootResponse>.Fail(
-                    $"No .sln or .slnx found in the git repository containing: {fullRootPath}");
+                return _workspace.CurrentSolution is null
+                    ? Result<SetSolutionRootResponse>.Fail(
+                        $"No .sln or .slnx found in the git repository containing: {fullRootPath}")
+                    : CurrentResponse(
+                        fullRootPath,
+                        followEnabled: true,
+                        $"No .sln or .slnx found in the git repository containing: {fullRootPath}. " +
+                        "Keeping the solution the workspace already has.");
 
             var currentPath = _workspace.CurrentSolution?.FilePath;
             if (PathsEqual(currentPath, solutionPath))
