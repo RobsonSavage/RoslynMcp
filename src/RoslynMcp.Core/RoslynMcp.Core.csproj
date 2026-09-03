@@ -18,6 +18,7 @@
     </PackageReference>
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" />
     <PackageReference Include="Nito.AsyncEx.Coordination" />
     <PackageReference Include="Serilog" />
     <PackageReference Include="System.Text.Json" />
