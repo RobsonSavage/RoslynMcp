@@ -188,8 +188,12 @@ try
 
     // ── Idle workspace unload ──
 
+    // No config file, or no such key, or an unparseable one: fall back to the declared default
+    // rather than silently disabling idle unload.
     var idleConfig = configManager.Get("workspace.idle_unload_minutes");
-    var idleMinutes = int.TryParse(idleConfig.Value ?? idleConfig.DefaultValue, out var im) ? im : 0;
+    var idleMinutes = int.TryParse(idleConfig.Value, out var im) ? im
+        : int.TryParse(idleConfig.DefaultValue, out var dm) ? dm
+        : 0;
     workspaceProvider.StartIdleMonitor(TimeSpan.FromMinutes(idleMinutes));
 
     // MCP server

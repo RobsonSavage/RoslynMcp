@@ -31,7 +31,7 @@ public class ConfigManager
         new("sqlite.busy_timeout_ms", "int", "1000", "SQLite busy timeout in ms"),
         new("sqlite.cache_size_kb", "int", "16000", "SQLite cache size in KB"),
         new("graph.auto_rebuild", "bool", "false", "Auto-rebuild dependency graph"),
-        new("workspace.idle_unload_minutes", "int", "0", "Unload the workspace after N minutes idle (0 = never)"),
+        new("workspace.idle_unload_minutes", "int", "30", "Unload the workspace after N minutes idle (0 = never)"),
     };
 
     private static readonly Dictionary<string, ConfigDefinition> s_definitionMap =
