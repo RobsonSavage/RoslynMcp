@@ -46,10 +46,19 @@ try
         ?? environmentSolutionPath
         ?? SolutionDiscovery.Discover(Directory.GetCurrentDirectory(), logger);
 
+    // A last resort, and deliberately not a pin. Discovery finds nothing in a
+    // tree that holds no solution - a Python repository, a notes directory - and
+    // the process exits here, before the MCP host is built, so `set_solution_root`
+    // is not reachable to rescue it. A bootstrap solution boots the server so its
+    // tools exist at all; it is kept out of `hasExplicitSolutionPin` so the first
+    // root a client reports still moves the server off it.
+    if (string.IsNullOrWhiteSpace(solutionPath))
+        solutionPath = ResolveBootstrapSolution(logger);
+
     if (string.IsNullOrWhiteSpace(solutionPath))
     {
-        logger.Fatal("No solution found. Pass --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH, or start Claude inside a git repository that contains a .sln/.slnx file");
-        Console.Error.WriteLine("Error: No solution resolved from CWD. Use --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH, or start Claude inside a git repository that contains a .sln/.slnx file.");
+        logger.Fatal("No solution found. Pass --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH or ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH, or start Claude inside a git repository that contains a .sln/.slnx file");
+        Console.Error.WriteLine("Error: No solution resolved from CWD. Use --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH or ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH, or start Claude inside a git repository that contains a .sln/.slnx file.");
         return 2;
     }
 
@@ -302,6 +311,35 @@ static bool NeedsWorkspace(string? toolName)
         return false;
 
     return toolName is not ("tool_enabled" or "get_workspace_status" or "set_solution_path" or "set_solution_root");
+}
+
+// The bootstrap solution, or null. Read only after discovery has already failed, so a working
+// directory that resolves a solution of its own never sees it.
+//
+// A missing file is a warning and not a failure: the alternative is throwing out of
+// MsBuildWorkspaceProvider several frames later, where the message names MSBuild rather than the
+// misconfigured variable. Falling through leaves the caller's "no solution resolved" error, which
+// is the one a reader can act on.
+static string? ResolveBootstrapSolution(Serilog.ILogger logger)
+{
+    var bootstrap = Environment.GetEnvironmentVariable("ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH");
+    if (string.IsNullOrWhiteSpace(bootstrap)) return null;
+
+    bootstrap = bootstrap.Trim();
+    if (!File.Exists(bootstrap))
+    {
+        logger.Warning(
+            "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH points at {SolutionPath}, which does not exist; ignoring it",
+            bootstrap);
+        return null;
+    }
+
+    logger.Information(
+        "No solution discovered from {WorkingDirectory}; booting on bootstrap solution {SolutionPath}. "
+            + "This is not a pin - workspace root following stays enabled",
+        Directory.GetCurrentDirectory(),
+        bootstrap);
+    return bootstrap;
 }
 
 // Note: values starting with "--" are treated as flags, not values. Use --key=value syntax for such values.

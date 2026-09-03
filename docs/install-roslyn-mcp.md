@@ -15,6 +15,10 @@ RoslynMcp.Server provides Roslyn-powered code analysis tools through the Model C
 An explicit `--solution-path` or `ROSLYNMCP_SOLUTION_PATH` is a pin. It disables client workspace
 following for that server process.
 
+`ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` is the opposite: a solution to start on when discovery finds
+none, which leaves following enabled. Without it a session started outside any solution kills the
+server at startup, and the tool that would have fixed it does not exist yet.
+
 ---
 
 ## Prerequisites
@@ -462,6 +466,7 @@ cat $env:TEMP\roslyn-mcp-wrapper.log | Select-String "Found solution"
 - Ensure you're running Claude Code from the correct worktree directory
 - Check that a `.sln` file exists in the directory tree
 - Check for `--solution-path` or `ROSLYNMCP_SOLUTION_PATH`; either one deliberately disables following
+- If the server did not start at all, check the working directory holds a solution, or set `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH`
 - Confirm the workspace-follow plugin is installed, enabled and trusted, then call `get_workspace_status`
 - Call `set_solution_root` with the absolute worktree directory to test the server independently of the client hook
 

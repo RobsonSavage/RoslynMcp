@@ -113,6 +113,10 @@ coordinated through the CallTool filter and `SolutionRuntime`:
   `--solution-path` / `ROSLYNMCP_SOLUTION_PATH` pin, or a successful manual `set_solution_path`,
   disables following for that server process. `workspace.follow_roots` is the solution-scoped kill
   switch.
+- **Bootstrap solution.** `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` is consulted only after discovery has
+  failed, and is deliberately kept out of `hasExplicitSolutionPin`, so the server starts in a tree
+  holding no solution and following still moves it off. Anything that folds it into the pin turns a
+  server that never starts into a server that starts and never follows.
 
 Client adapters live under `plugins/`. Keep the Claude plugin's `PreToolUse` fallback:
 `EnterWorktree` does not emit `CwdChanged` in Claude Code 2.1.259. Codex has no `CwdChanged` event,
@@ -186,6 +190,10 @@ Integration tests that load or unload a workspace belong in `[Collection("worksp
 the heap and race each other otherwise, and the heap-growth assertion in `IdleUnloadTest` is
 meaningless if another class is loading a solution alongside it.
 
+Build `-c Release` before running them. `FindServerExe` prefers `bin/Release` over `bin/Debug`, so a
+plain `dotnet build` leaves the stdio tests spawning whatever server was last published there - a
+change under test can appear to fail, or to pass, on a binary that does not contain it.
+
 ## Traps
 
 - **`MSBuildWorkspace.TryApplyChanges` writes the document to disk.** It is the only public route
@@ -195,6 +203,10 @@ meaningless if another class is loading a solution alongside it.
 - **`ProjectId` is a fresh GUID on every solution load.** Anything persisted must key off the
   project file path instead. The dependency graph used to key nodes by `ProjectId` and was orphaned
   by every restart.
+- **Startup resolution fails before the host exists.** `Program.cs` returns 2 when no solution
+  resolves, several lines before `Host.CreateEmptyApplicationBuilder`, so no tool - `set_solution_root`
+  included - can rescue a working directory that holds no solution. That is what
+  `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` exists for, and why a fix at the tool layer cannot work.
 - **`ROSLYNMCP_SOLUTION_PATH` beats CWD discovery.** A stale User-scope environment variable makes
   every worktree analyse the same solution, and it is invisible in the logs unless you look for the
   resolved path. It also disables client workspace following. Check it first when a worktree

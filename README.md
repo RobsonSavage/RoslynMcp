@@ -65,8 +65,17 @@ No directory argument is needed. The server resolves the solution from the worki
 1. `--solution-path <path>` CLI argument
 2. `ROSLYNMCP_SOLUTION_PATH` environment variable
 3. **Auto-discovery from CWD**: walk up to the enclosing git root (`.git` directory *or* file — git **worktrees** are supported), then locate the `.sln`/`.slnx` inside that repo.
+4. `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` environment variable - a fallback, not a pin.
 
 Auto-discovery considers every solution filename, including `RoslynMcp.sln`, so the server can analyze its own checkout.
+
+Steps 1 and 2 are pins: either one switches workspace following off for that server process. Step 4
+is not. It exists because a working directory with no solution in it - a Python repository, a notes
+directory - fails discovery, and the server then exits before the MCP host is built, so
+`set_solution_root` does not yet exist to be called. Point it at any solution you are happy to load
+(the server's own checkout does) and the server starts with its tools available; the first workspace
+root a client reports moves it to the right solution. A bootstrap path that does not exist is logged
+and ignored rather than loaded.
 
 `set_solution_path` switches the workspace, configuration and SQLite database as one operation.
 Existing tool calls finish first, and migrations run against the target database before it becomes active.
@@ -80,7 +89,9 @@ call pin the server for that process. Claude Code and Codex hook plugins are doc
 ### Install workspace-follow plugins
 
 The server must be configured under the MCP name `roslyn`. Do not set `--solution-path` or
-`ROSLYNMCP_SOLUTION_PATH` when workspace following is wanted.
+`ROSLYNMCP_SOLUTION_PATH` when workspace following is wanted. `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` is
+safe to set alongside following, and is what keeps the server alive in a session started outside any
+solution.
 
 On each Claude Code workstation, run these commands inside Claude Code, then restart it:
 
@@ -109,7 +120,7 @@ OpenCode 1.18.27 reads the server instruction to call `set_solution_root`, but i
 invoke a tool on an existing MCP connection. Start a new OpenCode session inside each worktree when
 deterministic selection is required.
 
-If the working directory is not inside a git repository, the server refuses to guess (it will not scan unrelated sibling trees) and exits with a clear message. Start Claude from inside the repository you want analyzed, or pin the path via `--solution-path` / `ROSLYNMCP_SOLUTION_PATH`.
+If the working directory is not inside a git repository, the server refuses to guess (it will not scan unrelated sibling trees) and exits with a clear message. Start Claude from inside the repository you want analyzed, pin the path via `--solution-path` / `ROSLYNMCP_SOLUTION_PATH`, or set `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` so the server starts anyway and can be moved with `set_solution_root`.
 
 For multi-worktree / multi-session setups and advanced wrapper-script configuration, see [docs/install-roslyn-mcp.md](docs/install-roslyn-mcp.md).
 
@@ -117,7 +128,8 @@ For multi-worktree / multi-session setups and advanced wrapper-script configurat
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `ROSLYNMCP_SOLUTION_PATH` | Explicit solution to load | (auto-discover) |
+| `ROSLYNMCP_SOLUTION_PATH` | Explicit solution to load (a pin; disables workspace following) | (auto-discover) |
+| `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` | Solution to boot on when discovery finds none; not a pin | (none: the server exits) |
 | `ROSLYNMCP_LOG_DIR` | Serilog file sink directory | `%LOCALAPPDATA%\RoslynMcp\logs` |
 | `ROSLYNMCP_WARMUP_PARALLELISM` | Projects compiled in parallel during `--warm-up` | `2` |
 
