@@ -77,6 +77,38 @@ context switch when it changes. Explicit startup paths and a successful manual `
 call pin the server for that process. Claude Code and Codex hook plugins are documented in
 [docs/install-roslyn-mcp.md](docs/install-roslyn-mcp.md).
 
+### Install workspace-follow plugins
+
+The server must be configured under the MCP name `roslyn`. Do not set `--solution-path` or
+`ROSLYNMCP_SOLUTION_PATH` when workspace following is wanted.
+
+On each Claude Code workstation, run these commands inside Claude Code, then restart it:
+
+```text
+/plugin marketplace add RobsonSavage/RoslynMcp
+/plugin install roslyn-workspace-follow@roslyn-mcp
+```
+
+The Claude plugin handles ordinary directory changes and calls `set_solution_root` before each
+Roslyn tool. The pre-tool call is required because `EnterWorktree` does not emit `CwdChanged` in
+Claude Code 2.1.259.
+
+On each Codex workstation, run:
+
+```text
+codex plugin marketplace add RobsonSavage/RoslynMcp
+codex plugin add roslyn-workspace-follow@roslyn-mcp
+```
+
+Review and trust the installed hook, then start a new thread. Codex has no directory-change event,
+so the plugin calls `set_solution_root` before each `mcp__roslyn__*` tool. This flow was verified
+with a fresh Codex thread rooted in a different checkout. `get_workspace_status` reported that
+checkout's solution and recorded one `set_solution_root` invocation.
+
+OpenCode 1.18.27 reads the server instruction to call `set_solution_root`, but its plugin API cannot
+invoke a tool on an existing MCP connection. Start a new OpenCode session inside each worktree when
+deterministic selection is required.
+
 If the working directory is not inside a git repository, the server refuses to guess (it will not scan unrelated sibling trees) and exits with a clear message. Start Claude from inside the repository you want analyzed, or pin the path via `--solution-path` / `ROSLYNMCP_SOLUTION_PATH`.
 
 For multi-worktree / multi-session setups and advanced wrapper-script configuration, see [docs/install-roslyn-mcp.md](docs/install-roslyn-mcp.md).

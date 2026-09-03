@@ -114,6 +114,12 @@ coordinated through the CallTool filter and `SolutionRuntime`:
   disables following for that server process. `workspace.follow_roots` is the solution-scoped kill
   switch.
 
+Client adapters live under `plugins/`. Keep the Claude plugin's `PreToolUse` fallback:
+`EnterWorktree` does not emit `CwdChanged` in Claude Code 2.1.259. Codex has no `CwdChanged` event,
+so its plugin also follows from `PreToolUse`. OpenCode 1.18.27 has no plugin API for invoking a tool
+on an existing MCP connection and relies on the server instruction instead. See
+`docs/install-roslyn-mcp.md` for installation and fallback flows.
+
 Rules if you touch this:
 
 - Request paths call `BeginRequestAsync(needsWorkspace, ct)` and `ExitRequest()` in a finally.
