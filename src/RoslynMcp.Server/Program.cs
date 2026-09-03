@@ -38,9 +38,13 @@ try
 {
     // ── Parse CLI args ──
 
-    var solutionPath = ParseArg(args, "--solution-path")
-        ?? Environment.GetEnvironmentVariable("ROSLYNMCP_SOLUTION_PATH")
-        ?? DiscoverSolution(Directory.GetCurrentDirectory(), logger);
+    var commandLineSolutionPath = ParseArg(args, "--solution-path");
+    var environmentSolutionPath = Environment.GetEnvironmentVariable("ROSLYNMCP_SOLUTION_PATH");
+    var hasExplicitSolutionPin = !string.IsNullOrWhiteSpace(commandLineSolutionPath)
+        || !string.IsNullOrWhiteSpace(environmentSolutionPath);
+    var solutionPath = commandLineSolutionPath
+        ?? environmentSolutionPath
+        ?? SolutionDiscovery.Discover(Directory.GetCurrentDirectory(), logger);
 
     if (string.IsNullOrWhiteSpace(solutionPath))
     {
@@ -82,6 +86,12 @@ try
         migrations,
         logger);
     var configManager = solutionRuntime.Config;
+    var workspaceSelection = new WorkspaceSelectionService(
+        workspaceProvider,
+        solutionRuntime,
+        configManager,
+        hasExplicitSolutionPin,
+        logger);
 
     var retentionConfig = configManager.Get("logging.file_retention_days");
     var retentionDays = int.TryParse(retentionConfig.Value, out var rd) ? rd
@@ -100,6 +110,7 @@ try
     builder.Services.AddSingleton<IWorkspaceProvider>(workspaceProvider);
     builder.Services.AddSingleton<ISqliteConnectionPool>(solutionRuntime);
     builder.Services.AddSingleton<ISolutionContextSwitcher>(solutionRuntime);
+    builder.Services.AddSingleton<IWorkspaceSelectionService>(workspaceSelection);
     var symbolResolver = new SymbolResolver(logger);
     builder.Services.AddSingleton(symbolResolver);
     builder.Services.AddSingleton<IWorkspaceHelpers>(new WorkspaceHelpers(workspaceProvider, symbolResolver));
@@ -130,7 +141,7 @@ try
         sp.GetRequiredService<IWorkspaceProvider>(),
         sp.GetRequiredService<IWorkspaceHelpers>(),
         sp.GetRequiredService<ConfigManager>(),
-        sp.GetRequiredService<ISolutionContextSwitcher>(),
+        sp.GetRequiredService<IWorkspaceSelectionService>(),
         sp.GetRequiredService<Serilog.ILogger>()));
 
     builder.Services.AddTransient(sp => new AnalyzeService(
@@ -220,7 +231,9 @@ try
 
     // MCP server
     builder.Services
-        .AddMcpServer()
+        .AddMcpServer(options => options.ServerInstructions =
+            "Before the first Roslyn tool call in a workspace, and after any working-directory or git-worktree change, call set_solution_root with rootPath set to the client's absolute current workspace directory. " +
+            "Do not retry when it reports that following is disabled by an explicit solution pin. A successful switch also changes the solution-scoped config and SQLite memory, knowledge-base, and graph data.")
         .WithStdioServerTransport()
         .WithToolsFromAssembly()
         .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, ct) =>
@@ -231,9 +244,9 @@ try
             var requestEntered = false;
             try
             {
-                // set_solution_path takes the runtime write lease inside SolutionRuntime. Every
-                // other tool takes a read lease so no caller can observe a mixed solution/database.
-                if (!string.Equals(toolName, "set_solution_path", StringComparison.Ordinal))
+                // Solution-selection tools take the runtime write lease inside SolutionRuntime.
+                // Every other tool takes a read lease so no caller can observe a mixed context.
+                if (toolName is not ("set_solution_path" or "set_solution_root"))
                     contextLease = await solutionRuntime.EnterReadAsync(ct);
 
                 // Reload the workspace if it was idle-unloaded, and hold the in-flight count for
@@ -274,63 +287,6 @@ return 0;
 
 // ── Helpers ──
 
-// Resolve the codebase from Claude's CWD: walk up from startDir to the enclosing git root
-// (".git" directory for a normal clone, or ".git" *file* for a worktree), then search for a
-// solution within that repo. If startDir is not inside any git repo, do NOT guess by scanning
-// unrelated trees — return null so the caller fails with a clear message. This is what stops the
-// server loading an arbitrary sibling solution when CWD is a multi-repo container directory.
-static string? DiscoverSolution(string startDir, Serilog.ILogger log)
-{
-    // Find git root by walking up. A worktree's ".git" is a file (gitdir: ...), not a directory,
-    // so accept either form — otherwise a worktree CWD would be misread as "not a repo".
-    string? gitRoot = null;
-    var current = startDir;
-    while (current != null)
-    {
-        var gitMarker = Path.Combine(current, ".git");
-        if (Directory.Exists(gitMarker) || File.Exists(gitMarker))
-        {
-            gitRoot = current;
-            log.Information("Found git root: {GitRoot}", gitRoot);
-            break;
-        }
-        var parent = Directory.GetParent(current)?.FullName;
-        if (parent == null || parent == current) break;
-        current = parent;
-    }
-
-    if (gitRoot == null)
-    {
-        log.Warning(
-            "CWD is not inside a git repository: {StartDir}. Refusing to scan unrelated directories. " +
-            "Start Claude inside the repository you want analyzed, or pass --solution-path / set ROSLYNMCP_SOLUTION_PATH.",
-            startDir);
-        return null;
-    }
-
-    // Search recursively within the git root for *.sln or *.slnx.
-    // Note: on Windows, "*.sln" glob also matches "*.slnx" due to legacy 8.3
-    // wildcard behavior, so we search broadly and filter by exact extension.
-    // Prefer the solution closest to git root (fewest path separators), then
-    // prefer .sln over .slnx at equal depth (main solution is typically .sln).
-    var allSolutionFiles = Directory.EnumerateFiles(gitRoot, "*.sln*", SearchOption.AllDirectories)
-        .Where(f => f.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
-                  || f.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
-        .ToList();
-
-    var sln = allSolutionFiles
-        .OrderBy(f => f.Count(c => c == Path.DirectorySeparatorChar || c == Path.AltDirectorySeparatorChar))
-        .ThenBy(f => f.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-        .FirstOrDefault();
-
-    if (sln != null)
-        log.Information("Auto-discovered solution: {SolutionPath}", sln);
-    else
-        log.Warning("No .sln or .slnx found under git root: {GitRoot}", gitRoot);
-
-    return sln;
-}
-
 // Tools backed only by SQLite (memory, KB, sessions, config) never touch the Roslyn workspace, so
 // they must not trigger a reload - otherwise a memory_store after an idle period pays a full
 // solution load. get_workspace_status is excluded so it can report the unloaded state instead of
@@ -345,7 +301,7 @@ static bool NeedsWorkspace(string? toolName)
         || toolName.StartsWith("config_", StringComparison.Ordinal))
         return false;
 
-    return toolName is not ("tool_enabled" or "get_workspace_status" or "set_solution_path");
+    return toolName is not ("tool_enabled" or "get_workspace_status" or "set_solution_path" or "set_solution_root");
 }
 
 // Note: values starting with "--" are treated as flags, not values. Use --key=value syntax for such values.

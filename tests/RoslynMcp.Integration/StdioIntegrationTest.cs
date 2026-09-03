@@ -267,7 +267,7 @@ public sealed class ServerFixture : IAsyncLifetime
             return Path.Combine(solutionDir, "src", "RoslynMcp.Server", "bin", "Debug", exeName);
 
         // Search for the exe in any configuration/framework subfolder
-        foreach (var config in new[] { "Debug", "Release" })
+        foreach (var config in new[] { "Release", "Debug" })
         {
             var configDir = Path.Combine(serverBinDir, config);
             if (!Directory.Exists(configDir)) continue;
@@ -331,6 +331,7 @@ public class StdioIntegrationTest : IClassFixture<ServerFixture>
 
         Assert.Contains("find_references", toolNames);
         Assert.Contains("get_workspace_status", toolNames);
+        Assert.Contains("set_solution_root", toolNames);
         Assert.Contains("understand_type", toolNames);
         Assert.Contains("session_start", toolNames);
         Assert.Contains("graph_add_node", toolNames);
@@ -490,5 +491,28 @@ public class StdioIntegrationTest : IClassFixture<ServerFixture>
         });
         Assert.NotNull(stats);
         Assert.False(stats.Value.TryGetProperty("isError", out var isError) && isError.GetBoolean());
+    }
+
+    [Fact]
+    public async Task SetSolutionRoot_DoesNotOverrideAnExplicitStartupPin()
+    {
+        EnsureReady();
+        Assert.NotNull(_server.SolutionPath);
+
+        var rootPath = Path.GetDirectoryName(_server.SolutionPath)!;
+        var result = await _server.SendRequestAsync("tools/call", new
+        {
+            name = "set_solution_root",
+            arguments = new { rootPath, warmUp = false }
+        });
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.TryGetProperty("content", out var content), result.Value.ToString());
+        var text = content[0].GetProperty("text").GetString()!;
+        using var parsed = JsonDocument.Parse(text);
+        Assert.False(parsed.RootElement.GetProperty("changed").GetBoolean());
+        Assert.False(parsed.RootElement.GetProperty("followEnabled").GetBoolean());
+        Assert.Equal(Path.GetFullPath(_server.SolutionPath), parsed.RootElement.GetProperty("solutionPath").GetString());
+        Assert.Contains("disabled", parsed.RootElement.GetProperty("message").GetString());
     }
 }

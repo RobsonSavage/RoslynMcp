@@ -245,11 +245,15 @@ public sealed class TestWorkspaceProvider : IWorkspaceProvider
         => throw new NotSupportedException("ReloadSolutionAsync is not supported in test workspace");
 }
 
-public sealed class TestSolutionContextSwitcher : ISolutionContextSwitcher
+public sealed class TestWorkspaceSelectionService : IWorkspaceSelectionService
 {
-    public Task<SetSolutionPathResponse> SwitchAsync(
-        string solutionPath,
-        bool warmUp,
+    public Task<Result<SetSolutionPathResponse>> SetSolutionPathAsync(
+        SetSolutionPathRequest request,
         CancellationToken ct = default) =>
         throw new NotSupportedException("Solution switching is not supported by this test");
+
+    public Task<Result<SetSolutionRootResponse>> SetSolutionRootAsync(
+        SetSolutionRootRequest request,
+        CancellationToken ct = default) =>
+        throw new NotSupportedException("Workspace root switching is not supported by this test");
 }

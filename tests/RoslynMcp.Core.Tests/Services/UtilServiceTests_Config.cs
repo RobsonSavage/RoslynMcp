@@ -25,7 +25,7 @@ public class UtilServiceTests_Config : IDisposable
         var provider = helper.CreateProvider();
         var helpers = helper.CreateHelpers(_logger);
         var config = new ConfigManager(_configDir);
-        return new UtilService(provider, helpers, config, new TestSolutionContextSwitcher(), _logger);
+        return new UtilService(provider, helpers, config, new TestWorkspaceSelectionService(), _logger);
     }
 
     private WorkspaceTestHelper CreateMinimalWorkspace()

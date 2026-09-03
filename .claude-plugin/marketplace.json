@@ -1,0 +1,14 @@
+{
+  "name": "roslyn-mcp",
+  "owner": {
+    "name": "Robson Savage"
+  },
+  "description": "Claude Code plugins for RoslynMcp.",
+  "plugins": [
+    {
+      "name": "roslyn-workspace-follow",
+      "source": "./plugins/claude/roslyn-workspace-follow",
+      "description": "Keeps RoslynMcp on the current Claude Code workspace after directory changes."
+    }
+  ]
+}
