@@ -113,6 +113,15 @@ public partial class GraphService
         }
     }
 
+    /// <summary>
+    /// A node id that survives a solution reload and a process restart. The project file path is
+    /// the only identity MSBuild guarantees; ProjectId is a per-load GUID.
+    /// </summary>
+    private static string StableProjectId(Project project) =>
+        project.FilePath is { Length: > 0 } path
+            ? Path.GetFullPath(path)
+            : "project:" + project.Name;
+
     // ── 10. graph_rebuild ──
 
     public async Task<Result<GraphRebuildResponse>> RebuildAsync(GraphRebuildRequest request, CancellationToken ct = default)
@@ -134,14 +143,22 @@ public partial class GraphService
             var nodeData = new List<(string Id, string Type, string Label)>();
             var edgeData = new List<(string SourceId, string TargetId, string Type)>();
 
+            // Key nodes by project file path. A ProjectId GUID is minted fresh every time the
+            // solution is opened, so GUID-keyed rows are orphaned by the next load or restart.
+            var stableId = new Dictionary<ProjectId, string>();
+            foreach (var project in solution.Projects)
+                stableId[project.Id] = StableProjectId(project);
+
             foreach (var project in solution.Projects)
             {
                 ct.ThrowIfCancellationRequested();
-                nodeData.Add((project.Id.Id.ToString(), "Project", project.Name));
+                nodeData.Add((stableId[project.Id], "Project", project.Name));
 
                 foreach (var projectRef in project.ProjectReferences)
                 {
-                    edgeData.Add((project.Id.Id.ToString(), projectRef.ProjectId.Id.ToString(), "ProjectReference"));
+                    // A reference to a project outside the solution has no node to point at.
+                    if (!stableId.TryGetValue(projectRef.ProjectId, out var targetId)) continue;
+                    edgeData.Add((stableId[project.Id], targetId, "ProjectReference"));
                 }
             }
 
@@ -159,14 +176,22 @@ public partial class GraphService
             {
                 if (request.FullRebuild)
                 {
+                    // Only rows this method produced. Nodes and edges added through graph_add_node
+                    // and graph_add_edge are the user's and must survive a rebuild.
                     using var delEdges = conn.CreateCommand();
                     delEdges.Transaction = tx;
-                    delEdges.CommandText = "DELETE FROM GraphEdges";
+                    delEdges.CommandText = "DELETE FROM GraphEdges WHERE IsDerived = 1";
                     await delEdges.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
+                    // Leave any derived node an authored edge still points at: dropping it would
+                    // violate the GraphEdges foreign key and roll the whole rebuild back.
                     using var delNodes = conn.CreateCommand();
                     delNodes.Transaction = tx;
-                    delNodes.CommandText = "DELETE FROM GraphNodes";
+                    delNodes.CommandText = """
+                        DELETE FROM GraphNodes
+                        WHERE IsDerived = 1
+                          AND Id NOT IN (SELECT SourceId FROM GraphEdges UNION SELECT TargetId FROM GraphEdges)
+                        """;
                     await delNodes.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 }
 
@@ -174,7 +199,7 @@ public partial class GraphService
                 using (var nodeCmd = conn.CreateCommand())
                 {
                     nodeCmd.Transaction = tx;
-                    nodeCmd.CommandText = "INSERT OR IGNORE INTO GraphNodes (Id, Type, Label, Properties) VALUES ($id, $type, $label, $properties)";
+                    nodeCmd.CommandText = "INSERT OR IGNORE INTO GraphNodes (Id, Type, Label, Properties, IsDerived) VALUES ($id, $type, $label, $properties, 1)";
                     var pId = nodeCmd.Parameters.Add("$id", SqliteType.Text);
                     var pType = nodeCmd.Parameters.Add("$type", SqliteType.Text);
                     var pLabel = nodeCmd.Parameters.Add("$label", SqliteType.Text);
@@ -194,8 +219,8 @@ public partial class GraphService
                 {
                     edgeCmd.Transaction = tx;
                     edgeCmd.CommandText = """
-                        INSERT OR IGNORE INTO GraphEdges (SourceId, TargetId, Type, Label, Properties)
-                        VALUES ($sourceId, $targetId, $type, $label, $properties)
+                        INSERT OR IGNORE INTO GraphEdges (SourceId, TargetId, Type, Label, Properties, IsDerived)
+                        VALUES ($sourceId, $targetId, $type, $label, $properties, 1)
                         """;
                     var pSourceId = edgeCmd.Parameters.Add("$sourceId", SqliteType.Text);
                     var pTargetId = edgeCmd.Parameters.Add("$targetId", SqliteType.Text);

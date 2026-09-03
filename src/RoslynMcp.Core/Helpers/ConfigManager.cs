@@ -30,8 +30,9 @@ public class ConfigManager
         new("logging.file_retention_days", "int", "7", "Log file retention in days"),
         new("sqlite.busy_timeout_ms", "int", "1000", "SQLite busy timeout in ms"),
         new("sqlite.cache_size_kb", "int", "16000", "SQLite cache size in KB"),
-        new("graph.auto_rebuild", "bool", "false", "Auto-rebuild dependency graph"),
+        new("graph.auto_rebuild", "bool", "true", "Rebuild the dependency graph after every solution load"),
         new("workspace.idle_unload_minutes", "int", "30", "Unload the workspace after N minutes idle (0 = never)"),
+        new("workspace.watch_files", "bool", "true", "Refresh the workspace from disk when source files change"),
     };
 
     private static readonly Dictionary<string, ConfigDefinition> s_definitionMap =

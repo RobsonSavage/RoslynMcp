@@ -13,8 +13,8 @@ Instead of grepping `.cs` files, the agent queries the actual compilation: type 
 | Project | TFM | Role |
 |---------|-----|------|
 | `RoslynMcp.Server` | net10.0 | The MCP **stdio** server (executable). Hosts all tools. |
-| `RoslynMcp.Core` | — | Workspace loading, analysis services, refactoring engine, SQLite-backed KB/memory/graph. |
-| `RoslynMcp.Shared` | — | Contracts/DTOs shared between server and extension. |
+| `RoslynMcp.Core` | netstandard2.0 | Workspace loading, analysis services, refactoring engine, SQLite-backed KB/memory/graph. |
+| `RoslynMcp.Shared` | netstandard2.0 | Contracts/DTOs shared between server and extension. |
 | `RoslynMcp.Extension` | net472 | Legacy Visual Studio extension (EmbedIO/VS SDK). Superseded by the MCP server — see [docs/MIGRATION.md](docs/MIGRATION.md). |
 
 Built on `Microsoft.CodeAnalysis.CSharp.Workspaces`, `Microsoft.CodeAnalysis.Workspaces.MSBuild`, `Microsoft.Build.Locator`, `ModelContextProtocol`, and Serilog.
@@ -76,7 +76,50 @@ For multi-worktree / multi-session setups and advanced wrapper-script configurat
 |----------|---------|---------|
 | `ROSLYNMCP_SOLUTION_PATH` | Explicit solution to load | (auto-discover) |
 | `ROSLYNMCP_LOG_DIR` | Serilog file sink directory | `%LOCALAPPDATA%\RoslynMcp\logs` |
-| `ROSLYNMCP_DATA_DIR` | SQLite state location (KB/memory/graph) | `.roslyn-mcp-v2/` in the workspace |
+| `ROSLYNMCP_WARMUP_PARALLELISM` | Projects compiled in parallel during `--warm-up` | `2` |
+
+The SQLite state location is not configurable by environment variable; see Runtime state below.
+
+## Keeping the index current
+
+MSBuildWorkspace takes a snapshot when it opens the solution and never looks at the filesystem
+again. The server closes that gap itself, so tools answer from what is on disk now rather than
+from what was there at startup.
+
+A file watcher over the solution directory records what changed; the next tool call applies it
+before the tool runs:
+
+| Change on disk | What happens |
+|----------------|--------------|
+| Text edit to a file already in the solution | That one document is refreshed (milliseconds) |
+| File added, deleted or renamed | One full solution reload |
+| `.csproj`, `.props`, `.targets`, `.sln`, `.slnx` touched | One full solution reload |
+| More than 200 files changed at once (a `git pull` or branch switch) | One full solution reload |
+| Watcher buffer overflow | One full solution reload |
+
+Reloads are coalesced: a pull that rewrites 500 files costs one reload on the next tool call, not
+500. `bin`, `obj`, `.git`, `.vs`, `node_modules` and `.roslyn-mcp-data` are ignored.
+
+The dependency graph is derived from the project list and project references, so it is rebuilt
+after every solution load. Nodes are keyed by project file path, which survives a reload and a
+process restart. Nodes and edges you add yourself with `graph_add_node` / `graph_add_edge` are
+kept when the derived rows are replaced.
+
+The workspace is also unloaded after a period with no tool calls, and reloaded on the next call.
+On a large solution that returns most of the process's memory to the OS between bursts of work;
+the reload costs roughly the original load time.
+
+### Configuration
+
+Settings live in `.roslyn-mcp-data\config.json` beside the solution, and are read and written with
+`config_get`, `config_set` and `config_list`. A missing file or a missing key falls back to the
+default below.
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `workspace.watch_files` | `true` | Refresh the workspace from disk when source files change |
+| `workspace.idle_unload_minutes` | `30` | Unload the workspace after N minutes idle (0 = never) |
+| `graph.auto_rebuild` | `true` | Rebuild the dependency graph after every solution load |
 
 ## Tools
 
@@ -104,7 +147,11 @@ For multi-worktree / multi-session setups and advanced wrapper-script configurat
 
 ## Runtime state
 
-Persistent KB/memory/graph data is stored as SQLite under `.roslyn-mcp-v2/` in the workspace (configurable via `ROSLYNMCP_DATA_DIR`). This directory and `*.db` files are git-ignored. Each worktree gets its own state, so concurrent sessions don't collide.
+Persistent KB/memory/graph data and `config.json` are stored in `.roslyn-mcp-data\` beside the
+resolved solution file. If that directory cannot be created (a read-only solution tree), the
+server falls back to `%TEMP%\RoslynMcp\<hash of solution dir>\` and logs a warning. Each worktree
+resolves its own solution, so it gets its own state and concurrent sessions don't collide. The
+whole directory is git-ignored.
 
 ## Updating
 

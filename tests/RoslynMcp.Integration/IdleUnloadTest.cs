@@ -12,6 +12,7 @@ namespace RoslynMcp.Integration;
 /// accumulate heap. Both tests live in one class so xunit runs them sequentially - the leak
 /// measurement is meaningless if the race test is churning workspaces alongside it.
 /// </summary>
+[Collection("workspace")]
 public sealed class IdleUnloadTest
 {
     private static readonly object s_locatorLock = new();
@@ -71,9 +72,7 @@ public sealed class IdleUnloadTest
             {
                 try
                 {
-                    await provider.EnsureLoadedAsync(ct);
-
-                    provider.EnterRequest();
+                    await provider.BeginRequestAsync(needsWorkspace: true, ct);
                     try
                     {
                         var loadedOnEntry = provider.IsLoaded;

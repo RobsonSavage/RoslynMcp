@@ -32,6 +32,18 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     private int _inFlight;
     private CancellationTokenSource? _idleCts;
 
+    // Staleness tracking. MSBuildWorkspace never looks at the filesystem again after a load, so
+    // edits made outside the workspace (the agent's own Edit/Write, a git checkout, another
+    // editor) are invisible until we push them back in.
+    private readonly ConcurrentDictionary<string, byte> _dirtyDocuments = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _syncLock = new(1, 1);
+    private FileSystemWatcher? _watcher;
+    private volatile bool _structuralChangePending;
+
+    // Past this many changed files a per-document reload is slower than reopening the solution,
+    // and the change is almost certainly a branch switch rather than an edit.
+    private const int MaxDirtyBeforeFullReload = 200;
+
     public bool HasSolution => _initialized && _workspace.CurrentSolution.ProjectIds.Count > 0;
     public Solution? CurrentSolution => _initialized ? _workspace.CurrentSolution : null;
 
@@ -189,7 +201,15 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         return Task.FromResult(project);
     }
 
-    public async Task<bool> TryReloadDocumentAsync(string filePath, CancellationToken ct = default)
+    public Task<bool> TryReloadDocumentAsync(string filePath, CancellationToken ct = default)
+        => ReloadDocumentCoreAsync(filePath, onlyIfChanged: false, ct);
+
+    /// <summary>
+    /// Applies the file's on-disk text to the workspace. With <paramref name="onlyIfChanged"/> the
+    /// apply is skipped when the text already matches: MSBuildWorkspace.TryApplyChanges writes the
+    /// document back to disk, which the watcher would see as a fresh change and refresh forever.
+    /// </summary>
+    private async Task<bool> ReloadDocumentCoreAsync(string filePath, bool onlyIfChanged, CancellationToken ct)
     {
         if (!_initialized) return false;
 
@@ -217,6 +237,13 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         {
             using var stream = new FileStream(normalized, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             var sourceText = SourceText.From(stream);
+
+            if (onlyIfChanged)
+            {
+                var current = await target.GetTextAsync(ct).ConfigureAwait(false);
+                if (current.ContentEquals(sourceText)) return false;
+            }
+
             var newSolution = _workspace.CurrentSolution.WithDocumentText(target.Id, sourceText);
             var applied = _workspace.TryApplyChanges(newSolution);
 
@@ -241,6 +268,8 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         await _reloadLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // Sampled before the load so changes arriving during it are not consumed by it.
+            var structuralPending = _structuralChangePending;
             var newSolutionDir = Path.GetDirectoryName(fullPath)!;
             var newWorkspace = MSBuildWorkspace.Create();
 
@@ -273,6 +302,9 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             _workspace.WorkspaceChanged += OnWorkspaceChanged;
             _initialized = true;
             RebuildDocumentCache();
+
+            // Everything on disk was just read, so any structural change already seen is applied.
+            if (structuralPending) _structuralChangePending = false;
 
             var solution = _workspace.CurrentSolution;
             _logger.Information("Solution switched: {ProjectCount} projects, {DocumentCount} documents",
@@ -311,16 +343,193 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         }
     }
 
+    // ── Disk staleness ──
+
+    /// <summary>
+    /// Watches the solution tree for source and project changes so a later tool call can refresh
+    /// the workspace before answering. Nothing is reloaded on the watcher thread; events only
+    /// record what went stale.
+    /// </summary>
+    public void StartFileWatcher()
+    {
+        if (_watcher != null) return;
+
+        try
+        {
+            var watcher = new FileSystemWatcher(_solutionDir)
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName,
+                // A git checkout can move thousands of files at once; the 8 KB default overflows.
+                InternalBufferSize = 64 * 1024,
+            };
+            watcher.Filters.Add("*.cs");
+            foreach (var buildFile in s_buildFileExtensions)
+                watcher.Filters.Add("*" + buildFile);
+
+            watcher.Changed += OnFileChanged;
+            watcher.Created += OnFileStructuralChange;
+            watcher.Deleted += OnFileStructuralChange;
+            watcher.Renamed += OnFileStructuralChange;
+            watcher.Error += OnWatcherError;
+            watcher.EnableRaisingEvents = true;
+
+            _watcher = watcher;
+            _logger.Information("Watching {SolutionDir} for source changes", _solutionDir);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Could not watch {SolutionDir}; tools may answer from a stale snapshot", _solutionDir);
+        }
+    }
+
+    /// <summary>
+    /// Applies everything the watcher recorded since the last call. Cheap and lock-free when
+    /// nothing changed, which is the common case between two tool calls.
+    /// </summary>
+    public async Task SyncPendingChangesAsync(CancellationToken ct = default)
+    {
+        if (!_initialized) return;
+        if (!_structuralChangePending && _dirtyDocuments.IsEmpty) return;
+
+        await _syncLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (!_initialized) return;
+
+            if (_structuralChangePending)
+            {
+                // Files were added, removed or renamed, or a project file changed. Only a reload
+                // gets the document list and compilation references right.
+                _logger.Information("Reloading solution: project or file structure changed on disk");
+                var sw = Stopwatch.StartNew();
+                await ReloadSolutionAsync(_solutionPath, warmUp: false, ct).ConfigureAwait(false);
+                _logger.Information("Solution reloaded after structural change in {ElapsedMs} ms", sw.ElapsedMilliseconds);
+                return;
+            }
+
+            var reloaded = 0;
+            foreach (var path in _dirtyDocuments.Keys)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                // Remove first: a write landing during the read leaves the path dirty again
+                // rather than being swallowed by this pass.
+                if (!_dirtyDocuments.TryRemove(path, out _)) continue;
+
+                try
+                {
+                    if (await ReloadDocumentCoreAsync(path, onlyIfChanged: true, ct).ConfigureAwait(false))
+                        reloaded++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.Warning(ex, "Failed to refresh stale document: {FilePath}", path);
+                }
+            }
+
+            if (reloaded > 0)
+                _logger.Information("Refreshed {Count} document(s) changed on disk", reloaded);
+        }
+        finally
+        {
+            _syncLock.Release();
+        }
+    }
+
+    private void OnFileChanged(object sender, FileSystemEventArgs e)
+    {
+        if (IsIgnored(e.FullPath)) return;
+
+        if (IsBuildFile(e.FullPath))
+        {
+            // A project, props or targets file can change the document list and the references,
+            // neither of which a per-document text refresh can express.
+            _structuralChangePending = true;
+            return;
+        }
+
+        if (_dirtyDocuments.Count >= MaxDirtyBeforeFullReload)
+        {
+            _structuralChangePending = true;
+            return;
+        }
+
+        _dirtyDocuments[NormalizePath(e.FullPath)] = 0;
+    }
+
+    private void OnFileStructuralChange(object sender, FileSystemEventArgs e)
+    {
+        if (IsIgnored(e.FullPath)) return;
+        _structuralChangePending = true;
+    }
+
+    private void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        // Buffer overflow: events were dropped, so nothing recorded can be trusted.
+        _logger.Warning(e.GetException(), "File watcher error; falling back to a full reload");
+        _structuralChangePending = true;
+    }
+
+    private static readonly string[] s_buildFileExtensions =
+        [".csproj", ".props", ".targets", ".sln", ".slnx"];
+
+    private static bool IsBuildFile(string fullPath)
+    {
+        var ext = Path.GetExtension(fullPath);
+        foreach (var candidate in s_buildFileExtensions)
+        {
+            if (string.Equals(ext, candidate, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Build output, git internals and our own data directory are never solution sources.</summary>
+    private static bool IsIgnored(string fullPath)
+    {
+        var sep = Path.DirectorySeparatorChar;
+        foreach (var segment in new[] { "bin", "obj", ".git", ".vs", "node_modules", ".roslyn-mcp-data" })
+        {
+            if (fullPath.Contains($"{sep}{segment}{sep}", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
     // ── Idle unload ──
 
     /// <summary>
-    /// Marks the start of a request. Call in a using/try around every tool invocation so the
-    /// idle sweep cannot unload the workspace while a call is still using it.
+    /// Marks the start of a request. Only safe when no sweep can be running: incrementing on its
+    /// own leaves a window where an unload has already passed its in-flight check but has not yet
+    /// swapped the workspace out. Request paths must use <see cref="BeginRequestAsync"/>.
     /// </summary>
     public void EnterRequest()
     {
         Interlocked.Increment(ref _inFlight);
         Volatile.Write(ref _lastActivityTicks, DateTime.UtcNow.Ticks);
+    }
+
+    /// <summary>
+    /// Loads the workspace if it was idle-unloaded and joins the in-flight count, both under the
+    /// same lock an unload takes. A request that returns from here either started before the
+    /// unload checked in-flight (so the unload declines) or after it finished (so it reloads).
+    /// </summary>
+    public async Task BeginRequestAsync(bool needsWorkspace, CancellationToken ct = default)
+    {
+        await _ensureLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (needsWorkspace)
+                await LoadIfUnloadedAsync(ct).ConfigureAwait(false);
+
+            Interlocked.Increment(ref _inFlight);
+            Volatile.Write(ref _lastActivityTicks, DateTime.UtcNow.Ticks);
+        }
+        finally
+        {
+            _ensureLock.Release();
+        }
     }
 
     /// <summary>Marks the end of a request and restarts the idle clock.</summary>
@@ -341,17 +550,23 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         await _ensureLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_initialized) return;
-
-            _logger.Information("Reloading workspace after idle unload: {SolutionPath}", _solutionPath);
-            var sw = Stopwatch.StartNew();
-            await ReloadSolutionAsync(_solutionPath, warmUp: false, ct).ConfigureAwait(false);
-            _logger.Information("Workspace reloaded in {ElapsedMs} ms", sw.ElapsedMilliseconds);
+            await LoadIfUnloadedAsync(ct).ConfigureAwait(false);
         }
         finally
         {
             _ensureLock.Release();
         }
+    }
+
+    /// <summary>Reload after an idle unload. Caller must hold _ensureLock.</summary>
+    private async Task LoadIfUnloadedAsync(CancellationToken ct)
+    {
+        if (_initialized) return;
+
+        _logger.Information("Reloading workspace after idle unload: {SolutionPath}", _solutionPath);
+        var sw = Stopwatch.StartNew();
+        await ReloadSolutionAsync(_solutionPath, warmUp: false, ct).ConfigureAwait(false);
+        _logger.Information("Workspace reloaded in {ElapsedMs} ms", sw.ElapsedMilliseconds);
     }
 
     /// <summary>
@@ -475,10 +690,12 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     {
         _idleCts?.Cancel();
         _idleCts?.Dispose();
+        _watcher?.Dispose();
         _workspace.WorkspaceChanged -= OnWorkspaceChanged;
         _workspace.Dispose();
         _reloadLock.Dispose();
         _ensureLock.Dispose();
+        _syncLock.Dispose();
         return default;
     }
 

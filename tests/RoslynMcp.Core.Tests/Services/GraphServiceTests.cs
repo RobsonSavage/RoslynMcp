@@ -24,7 +24,7 @@ public class GraphServiceTests : IAsyncDisposable, IAsyncLifetime
     public async Task InitializeAsync()
     {
         var runner = new MigrationRunner(_pool, _dbPath,
-            new IMigration[] { new V1_MemoryTables(), new V2_GraphTables() }, _logger);
+            new IMigration[] { new V1_MemoryTables(), new V2_GraphTables(), new V3_KBTables(), new V4_GraphProvenance() }, _logger);
         await runner.RunAsync();
     }
 

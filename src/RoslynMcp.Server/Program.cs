@@ -10,6 +10,7 @@ using RoslynMcp.Core.Services;
 using RoslynMcp.Server.Providers;
 using RoslynMcp.Server.Services;
 using RoslynMcp.Shared;
+using RoslynMcp.Shared.Contracts.Graph;
 using Serilog;
 
 // ── Logging ──
@@ -109,7 +110,10 @@ try
     var cacheSizeKb = int.TryParse(csConfig.Value ?? csConfig.DefaultValue, out var cs) ? cs : 16000;
     await using var pool = new SqliteConnectionPool(dbPath, logger: logger,
         busyTimeoutMs: busyTimeoutMs, cacheSizeKb: cacheSizeKb);
-    var migrations = new IMigration[] { new V1_MemoryTables(), new V2_GraphTables(), new V3_KBTables() };
+    var migrations = new IMigration[]
+    {
+        new V1_MemoryTables(), new V2_GraphTables(), new V3_KBTables(), new V4_GraphProvenance()
+    };
     var migrationRunner = new MigrationRunner(pool, dbPath, migrations, logger);
     var applied = await migrationRunner.RunAsync();
     if (applied > 0)
@@ -172,10 +176,10 @@ try
         dbPath,
         sp.GetRequiredService<Serilog.ILogger>()));
 
-    builder.Services.AddTransient(sp => new GraphService(
-        sp.GetRequiredService<ISqliteConnectionPool>(),
-        sp.GetRequiredService<Serilog.ILogger>(),
-        sp.GetRequiredService<IWorkspaceProvider>()));
+    // Singleton so the stale/rebuilt version counters mean something: as a transient every tool
+    // call got a fresh instance, which reported the graph stale unconditionally.
+    var graphService = new GraphService(pool, logger, workspaceProvider);
+    builder.Services.AddSingleton(graphService);
 
     builder.Services.AddTransient(sp => new KBService(
         sp.GetRequiredService<ISqliteConnectionPool>(),
@@ -196,6 +200,53 @@ try
         : 0;
     workspaceProvider.StartIdleMonitor(TimeSpan.FromMinutes(idleMinutes));
 
+    // ── Disk staleness ──
+
+    var watchConfig = configManager.Get("workspace.watch_files");
+    var watchFiles = bool.TryParse(watchConfig.Value, out var wf) ? wf
+        : !bool.TryParse(watchConfig.DefaultValue, out var wd) || wd;
+    if (watchFiles)
+        workspaceProvider.StartFileWatcher();
+    else
+        logger.Information("File watching disabled; tools may answer from a stale snapshot");
+
+    // ── Dependency graph ──
+
+    // The graph is derived from the project list and project references, so a solution reload
+    // invalidates all of it. Rebuilding walks the project graph without compiling anything.
+    var rebuildConfig = configManager.Get("graph.auto_rebuild");
+    var autoRebuildGraph = bool.TryParse(rebuildConfig.Value, out var ar) ? ar
+        : bool.TryParse(rebuildConfig.DefaultValue, out var ad) && ad;
+
+    void RebuildGraphInBackground()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var result = await graphService.RebuildAsync(new GraphRebuildRequest(FullRebuild: true));
+                if (!result.IsSuccess)
+                    logger.Warning("Dependency graph rebuild failed: {Error}", result.Error?.Message);
+            }
+            catch (Exception ex)
+            {
+                logger.Warning(ex, "Dependency graph rebuild failed");
+            }
+        });
+    }
+
+    if (autoRebuildGraph)
+    {
+        RebuildGraphInBackground();
+        workspaceProvider.SolutionChanged += (_, e) =>
+        {
+            // A null NewSolution is an idle unload; the reload that follows raises its own event.
+            if (e.NewSolution != null)
+                RebuildGraphInBackground();
+        };
+        logger.Information("Dependency graph auto-rebuild enabled");
+    }
+
     // MCP server
     builder.Services
         .AddMcpServer()
@@ -205,12 +256,15 @@ try
         {
             // Single choke point for all tools: reload the workspace if it was idle-unloaded,
             // and hold the in-flight count for the duration so the sweep cannot unload underneath.
-            if (NeedsWorkspace(context.Params?.Name))
-                await workspaceProvider.EnsureLoadedAsync(ct);
-
-            workspaceProvider.EnterRequest();
+            var needsWorkspace = NeedsWorkspace(context.Params?.Name);
+            await workspaceProvider.BeginRequestAsync(needsWorkspace, ct);
             try
             {
+                // Push any on-disk edits into the workspace before the tool reads it. Held inside
+                // the in-flight guard so a sweep cannot unload mid-refresh.
+                if (needsWorkspace)
+                    await workspaceProvider.SyncPendingChangesAsync(ct);
+
                 return await next(context, ct);
             }
             finally

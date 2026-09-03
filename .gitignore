@@ -24,8 +24,8 @@ artifacts/
 packages/
 .nuget/
 
-# RoslynMcp runtime state (local SQLite KB/memory/graph DB)
-.roslyn-mcp-v2/
+# RoslynMcp runtime state (local SQLite KB/memory/graph DB, config.json)
+.roslyn-mcp-data/
 *.db
 *.db.backup.*
 
