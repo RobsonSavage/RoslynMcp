@@ -186,11 +186,34 @@ try
         sp.GetRequiredService<IWorkspaceProvider>(),
         sp.GetRequiredService<Serilog.ILogger>()));
 
+    // ── Idle workspace unload ──
+
+    var idleConfig = configManager.Get("workspace.idle_unload_minutes");
+    var idleMinutes = int.TryParse(idleConfig.Value ?? idleConfig.DefaultValue, out var im) ? im : 0;
+    workspaceProvider.StartIdleMonitor(TimeSpan.FromMinutes(idleMinutes));
+
     // MCP server
     builder.Services
         .AddMcpServer()
         .WithStdioServerTransport()
-        .WithToolsFromAssembly();
+        .WithToolsFromAssembly()
+        .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, ct) =>
+        {
+            // Single choke point for all tools: reload the workspace if it was idle-unloaded,
+            // and hold the in-flight count for the duration so the sweep cannot unload underneath.
+            if (NeedsWorkspace(context.Params?.Name))
+                await workspaceProvider.EnsureLoadedAsync(ct);
+
+            workspaceProvider.EnterRequest();
+            try
+            {
+                return await next(context, ct);
+            }
+            finally
+            {
+                workspaceProvider.ExitRequest();
+            }
+        }));
 
     // ── Run ──
 
@@ -266,6 +289,23 @@ static string? DiscoverSolution(string startDir, Serilog.ILogger log)
         log.Warning("No .sln or .slnx found under git root: {GitRoot}", gitRoot);
 
     return sln;
+}
+
+// Tools backed only by SQLite (memory, KB, sessions, config) never touch the Roslyn workspace, so
+// they must not trigger a reload - otherwise a memory_store after an idle period pays a full
+// solution load. get_workspace_status is excluded so it can report the unloaded state instead of
+// ending it, and set_solution_path so it does not load the outgoing solution just to replace it.
+static bool NeedsWorkspace(string? toolName)
+{
+    if (string.IsNullOrEmpty(toolName)) return true;
+
+    if (toolName.StartsWith("memory_", StringComparison.Ordinal)
+        || toolName.StartsWith("kb_", StringComparison.Ordinal)
+        || toolName.StartsWith("session_", StringComparison.Ordinal)
+        || toolName.StartsWith("config_", StringComparison.Ordinal))
+        return false;
+
+    return toolName is not ("tool_enabled" or "get_workspace_status" or "set_solution_path");
 }
 
 // Note: values starting with "--" are treated as flags, not values. Use --key=value syntax for such values.
