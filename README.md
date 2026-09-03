@@ -35,15 +35,21 @@ Publish the server to a user-local location (`%LOCALAPPDATA%\RoslynMcp`):
 
 Output: `%LOCALAPPDATA%\RoslynMcp\RoslynMcp.Server.exe` (framework-dependent, plus dependencies).
 
+After a successful publish, `configure-clients.ps1` configures the user-scoped Claude Code
+and Codex MCP entries. It also sets `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` to this clone's
+`RoslynMcp.sln` when the user does not already have a valid bootstrap solution. Existing
+valid values are preserved. Restart Claude Code and Codex after publishing.
+
 To run tests:
 
 ```powershell
 dotnet test RoslynMcp.sln
 ```
 
-## Configure (Claude Code)
+## Client configuration
 
-Add to `~/.claude.json` under `mcpServers`:
+`publish-local.ps1` writes these settings. The Claude Code entry in `~/.claude.json`
+includes the environment reference:
 
 ```json
 {
@@ -52,10 +58,24 @@ Add to `~/.claude.json` under `mcpServers`:
       "type": "stdio",
       "command": "cmd",
       "args": ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"],
+      "env": {
+        "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH": "${ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}"
+      },
       "timeout": 120000
     }
   }
 }
+```
+
+Codex receives the matching whitelist in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.roslyn]
+command = "cmd"
+args = ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"]
+env_vars = ["ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"]
+tool_timeout_sec = 60
+startup_timeout_sec = 120
 ```
 
 No directory argument is needed. The server resolves the solution from the working directory Claude launches it in — see below.
@@ -212,7 +232,7 @@ whole directory is git-ignored.
 
 ## Updating
 
-After pulling server changes, re-publish and restart Claude Code:
+After pulling server changes, re-publish and restart Claude Code and Codex:
 
 ```powershell
 .\publish-local.ps1

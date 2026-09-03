@@ -33,10 +33,9 @@ function Get-TextState {
     }
 }
 
-function Write-TextAtomic {
+function Assert-TextStateCurrent {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$Text,
         [Parameter(Mandatory)]$ExpectedState
     )
 
@@ -50,12 +49,23 @@ function Write-TextAtomic {
             throw "Configuration changed while it was being prepared: $Path"
         }
     }
+}
+
+function Write-TextAtomic {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)]$ExpectedState
+    )
+
+    Assert-TextStateCurrent -Path $Path -ExpectedState $ExpectedState
 
     $directory = Split-Path -Parent $Path
     [void](New-Item -ItemType Directory -Path $directory -Force)
     $temporaryPath = Join-Path $directory ".$([IO.Path]::GetFileName($Path)).$([guid]::NewGuid().ToString('N')).tmp"
     try {
         [IO.File]::WriteAllText($temporaryPath, $Text, [Text.UTF8Encoding]::new($false))
+        Assert-TextStateCurrent -Path $Path -ExpectedState $ExpectedState
         Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
     }
     finally {
@@ -134,34 +144,36 @@ function Update-ClaudeConfig {
         return
     }
 
-    try {
-        $root = $state.Text | ConvertFrom-Json
+    $matches = [regex]::Matches($state.Text, '(?m)^  "mcpServers"\s*:\s*\{')
+    if ($matches.Count -gt 1) {
+        throw "Claude Code configuration contains more than one top-level mcpServers object: $Path"
     }
-    catch {
-        throw "Claude Code configuration is not valid JSON: $Path"
-    }
+    if ($matches.Count -eq 0) {
+        try {
+            $root = $state.Text | ConvertFrom-Json
+        }
+        catch {
+            throw "Claude Code configuration is not valid JSON: $Path"
+        }
+        if ($null -ne $root.PSObject.Properties["mcpServers"]) {
+            throw "Claude Code mcpServers must be a two-space-indented top-level object: $Path"
+        }
 
-    $property = $root.PSObject.Properties["mcpServers"]
-    if ($null -eq $property) {
         $trimmed = $state.Text.TrimEnd()
         $closingBrace = $trimmed.LastIndexOf('}')
         if ($closingBrace -lt 0) {
             throw "Claude Code configuration has no root object: $Path"
         }
         $prefix = $trimmed.Substring(0, $closingBrace).TrimEnd()
-        $separator = if ($root.PSObject.Properties.Count -eq 0) { "" } else { "," }
+        $separator = if (@($root.PSObject.Properties).Count -eq 0) { "" } else { "," }
         $servers = [pscustomobject][ordered]@{ roslyn = New-ClaudeRoslynEntry }
         $rendered = $servers | ConvertTo-Json -Depth 20
+        $rendered = $rendered.Replace(([string][char]13 + [char]10), [string][char]10)
         $rendered = $rendered.Replace([string][char]10, $state.Newline + "  ")
         $content = $prefix + $separator + $state.Newline + '  "mcpServers": ' + $rendered + $state.Newline + '}' + $state.Newline
         Write-TextAtomic -Path $Path -Text $content -ExpectedState $state
         Write-Host "INFO: Added the Roslyn MCP server to Claude Code configuration"
         return
-    }
-
-    $matches = [regex]::Matches($state.Text, '(?m)^  "mcpServers"\s*:\s*\{')
-    if ($matches.Count -ne 1) {
-        throw "Claude Code mcpServers must be a two-space-indented top-level object: $Path"
     }
 
     $start = $state.Text.IndexOf('{', $matches[0].Index)
@@ -194,6 +206,7 @@ function Update-ClaudeConfig {
     }
 
     $rendered = $servers | ConvertTo-Json -Depth 20
+    $rendered = $rendered.Replace(([string][char]13 + [char]10), [string][char]10)
     $rendered = $rendered.Replace([string][char]10, $state.Newline + "  ")
     $content = $state.Text.Substring(0, $start) + $rendered + $state.Text.Substring($end + 1)
     if ($content -eq $state.Text) {
