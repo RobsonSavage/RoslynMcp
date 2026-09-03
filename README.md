@@ -66,6 +66,8 @@ No directory argument is needed. The server resolves the solution from the worki
 2. `ROSLYNMCP_SOLUTION_PATH` environment variable
 3. **Auto-discovery from CWD**: walk up to the enclosing git root (`.git` directory *or* file — git **worktrees** are supported), then locate the `.sln`/`.slnx` inside that repo.
 
+Auto-discovery considers every solution filename, including `RoslynMcp.sln`, so the server can analyze its own checkout.
+
 If the working directory is not inside a git repository, the server refuses to guess (it will not scan unrelated sibling trees) and exits with a clear message. Start Claude from inside the repository you want analyzed, or pin the path via `--solution-path` / `ROSLYNMCP_SOLUTION_PATH`.
 
 For multi-worktree / multi-session setups and advanced wrapper-script configuration, see [docs/install-roslyn-mcp.md](docs/install-roslyn-mcp.md).

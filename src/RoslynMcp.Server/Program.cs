@@ -333,7 +333,6 @@ static string? DiscoverSolution(string startDir, Serilog.ILogger log)
     var allSolutionFiles = Directory.EnumerateFiles(gitRoot, "*.sln*", SearchOption.AllDirectories)
         .Where(f => f.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
                   || f.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
-        .Where(f => !Path.GetFileName(f).Equals("RoslynMcp.sln", StringComparison.OrdinalIgnoreCase))
         .ToList();
 
     var sln = allSolutionFiles

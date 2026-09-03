@@ -176,6 +176,9 @@ meaningless if another class is loading a solution alongside it.
 - **`ROSLYNMCP_SOLUTION_PATH` beats CWD discovery.** A stale User-scope environment variable makes
   every worktree analyse the same solution, and it is invisible in the logs unless you look for the
   resolved path. Check it first when a worktree reports the wrong code.
+- **CWD discovery includes `RoslynMcp.sln`.** The server's checkout is a valid target, so
+  `DiscoverSolution` must not exclude a solution by filename. `SolutionDiscoveryTest` starts the
+  real server without `--solution-path` and clears `ROSLYNMCP_SOLUTION_PATH` to cover this path.
 - **Environment variables are captured at process spawn.** Changing one does not reach a running
   server; the Claude session has to restart.
 - **Log retention does not prune.** `retainedFileCountLimit: 7` does not span the `_NNN` suffixed
