@@ -1,0 +1,20 @@
+{
+  "name": "roslyn-mcp",
+  "interface": {
+    "displayName": "RoslynMcp"
+  },
+  "plugins": [
+    {
+      "name": "roslyn-workspace-follow",
+      "source": {
+        "source": "local",
+        "path": "./plugins/roslyn-workspace-follow"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

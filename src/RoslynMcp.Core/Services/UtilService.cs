@@ -16,20 +16,20 @@ public class UtilService
     private readonly IWorkspaceProvider _workspace;
     private readonly IWorkspaceHelpers _helpers;
     private readonly ConfigManager _config;
-    private readonly ISolutionContextSwitcher _solutionContextSwitcher;
+    private readonly IWorkspaceSelectionService _workspaceSelection;
     private readonly ILogger _logger;
 
     public UtilService(
         IWorkspaceProvider workspace,
         IWorkspaceHelpers helpers,
         ConfigManager config,
-        ISolutionContextSwitcher solutionContextSwitcher,
+        IWorkspaceSelectionService workspaceSelection,
         ILogger logger)
     {
         _workspace = workspace;
         _helpers = helpers;
         _config = config;
-        _solutionContextSwitcher = solutionContextSwitcher;
+        _workspaceSelection = workspaceSelection;
         _logger = logger;
     }
 
@@ -315,19 +315,18 @@ public class UtilService
     public async Task<Result<SetSolutionPathResponse>> SetSolutionPathAsync(
         SetSolutionPathRequest request, CancellationToken ct = default)
     {
-        var fullPath = Path.GetFullPath(request.SolutionPath);
-        if (!File.Exists(fullPath))
-            return Result<SetSolutionPathResponse>.Fail($"Solution file not found: {fullPath}");
-
-        var ext = Path.GetExtension(fullPath);
-        if (!ext.Equals(".sln", StringComparison.OrdinalIgnoreCase) &&
-            !ext.Equals(".slnx", StringComparison.OrdinalIgnoreCase))
-            return Result<SetSolutionPathResponse>.Fail($"Not a solution file (expected .sln or .slnx): {fullPath}");
-
-        return await _solutionContextSwitcher.SwitchAsync(fullPath, request.WarmUp, ct).ConfigureAwait(false);
+        return await _workspaceSelection.SetSolutionPathAsync(request, ct).ConfigureAwait(false);
     }
 
-    // ── 10. config_get ──
+    // ── 10. set_solution_root ──
+
+    public async Task<Result<SetSolutionRootResponse>> SetSolutionRootAsync(
+        SetSolutionRootRequest request, CancellationToken ct = default)
+    {
+        return await _workspaceSelection.SetSolutionRootAsync(request, ct).ConfigureAwait(false);
+    }
+
+    // ── 11. config_get ──
 
     public Task<Result<ConfigGetResponse>> ConfigGetAsync(
         ConfigGetRequest request, CancellationToken ct = default)
@@ -337,7 +336,7 @@ public class UtilService
         return Task.FromResult(Result<ConfigGetResponse>.Ok(response));
     }
 
-    // ── 11. config_set ──
+    // ── 12. config_set ──
 
     public Task<Result<ConfigSetResponse>> ConfigSetAsync(
         ConfigSetRequest request, CancellationToken ct = default)
@@ -349,7 +348,7 @@ public class UtilService
         return Task.FromResult(Result<ConfigSetResponse>.Ok(response));
     }
 
-    // ── 12. config_list ──
+    // ── 13. config_list ──
 
     public Task<Result<ConfigListResponse>> ConfigListAsync(
         ConfigListRequest request, CancellationToken ct = default)
@@ -359,7 +358,7 @@ public class UtilService
         return Task.FromResult(Result<ConfigListResponse>.Ok(response));
     }
 
-    // ── 13. tool_enabled ──
+    // ── 14. tool_enabled ──
 
     public Task<Result<ToolEnabledResponse>> ToolEnabledAsync(
         ToolEnabledRequest request, CancellationToken ct = default)

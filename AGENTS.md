@@ -6,7 +6,7 @@ the layering rules, the places a change has to touch, and the traps that have al
 ## What this is
 
 An MCP stdio server that answers semantic C# questions against a live Roslyn compilation, plus a
-SQLite-backed knowledge base, memory store and dependency graph. 96 tools. The consumer is another
+SQLite-backed knowledge base, memory store and dependency graph. 97 tools. The consumer is another
 AI agent (Claude Code), not a human clicking buttons, so tool output shape and error messages
 matter as much as correctness.
 
@@ -108,6 +108,11 @@ coordinated through the CallTool filter and `SolutionRuntime`:
 - **Solution switching.** `SolutionRuntime` takes an exclusive lease while it switches the
   workspace, configuration and routed SQLite pool. Other tools and background graph rebuilds take
   read leases, so they cannot observe a mixed solution context.
+- **Client workspace following.** `set_solution_root` runs the startup discovery walk for a
+  client-reported directory and switches only when it resolves a different solution. An explicit
+  `--solution-path` / `ROSLYNMCP_SOLUTION_PATH` pin, or a successful manual `set_solution_path`,
+  disables following for that server process. `workspace.follow_roots` is the solution-scoped kill
+  switch.
 
 Rules if you touch this:
 
@@ -118,9 +123,10 @@ Rules if you touch this:
 - `NeedsWorkspace(toolName)` in `Program.cs` decides whether a tool forces a reload. Memory, KB,
   session and config tools do not need a solution; anything else does. Add new prefixes there
   rather than making the tool tolerate an unloaded workspace.
-- Every tool except `set_solution_path` takes `SolutionRuntime.EnterReadAsync()` in the CallTool
-  filter. `set_solution_path` takes the write lease inside `SolutionRuntime.SwitchAsync`; taking a
-  read lease around it deadlocks the switch.
+- Every tool except `set_solution_path` and `set_solution_root` takes
+  `SolutionRuntime.EnterReadAsync()` in the CallTool filter. Both selection tools take the write
+  lease inside `SolutionRuntime.SwitchAsync`; taking a read lease around either one deadlocks the
+  switch.
 - Do not add work to the watcher event handlers. They record a path and return; all reloading
   happens on the request thread.
 
@@ -185,9 +191,13 @@ meaningless if another class is loading a solution alongside it.
   by every restart.
 - **`ROSLYNMCP_SOLUTION_PATH` beats CWD discovery.** A stale User-scope environment variable makes
   every worktree analyse the same solution, and it is invisible in the logs unless you look for the
-  resolved path. Check it first when a worktree reports the wrong code.
+  resolved path. It also disables client workspace following. Check it first when a worktree
+  reports the wrong code.
+- **Following a workspace swaps solution-scoped data.** `set_solution_root` uses the same complete
+  context switch as `set_solution_path`, so config, memory, KB and graph tools immediately route to
+  the target solution's `.roslyn-mcp-data` directory.
 - **CWD discovery includes `RoslynMcp.sln`.** The server's checkout is a valid target, so
-  `DiscoverSolution` must not exclude a solution by filename. `SolutionDiscoveryTest` starts the
+  `SolutionDiscovery.Discover` must not exclude a solution by filename. `SolutionDiscoveryTest` starts the
   real server without `--solution-path` and clears `ROSLYNMCP_SOLUTION_PATH` to cover this path.
 - **Environment variables are captured at process spawn.** Changing one does not reach a running
   server; the Claude session has to restart.

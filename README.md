@@ -71,6 +71,12 @@ Auto-discovery considers every solution filename, including `RoslynMcp.sln`, so 
 `set_solution_path` switches the workspace, configuration and SQLite database as one operation.
 Existing tool calls finish first, and migrations run against the target database before it becomes active.
 
+Clients that can report their current directory can call `set_solution_root`. It repeats the same
+git-root and solution discovery, no-ops when the solution is unchanged, and uses the complete
+context switch when it changes. Explicit startup paths and a successful manual `set_solution_path`
+call pin the server for that process. Claude Code and Codex hook plugins are documented in
+[docs/install-roslyn-mcp.md](docs/install-roslyn-mcp.md).
+
 If the working directory is not inside a git repository, the server refuses to guess (it will not scan unrelated sibling trees) and exits with a clear message. Start Claude from inside the repository you want analyzed, or pin the path via `--solution-path` / `ROSLYNMCP_SOLUTION_PATH`.
 
 For multi-worktree / multi-session setups and advanced wrapper-script configuration, see [docs/install-roslyn-mcp.md](docs/install-roslyn-mcp.md).
@@ -124,12 +130,13 @@ default below.
 |-----|---------|--------|
 | `workspace.watch_files` | `true` | Refresh the workspace from disk when source files change |
 | `workspace.idle_unload_minutes` | `30` | Unload the workspace after N minutes idle (0 = never) |
+| `workspace.follow_roots` | `true` | Allow client hooks to follow reported workspace roots |
 | `graph.auto_rebuild` | `true` | Rebuild the dependency graph after every solution load |
 | `logging.file_retention_days` | `7` | Prune matching server logs older than N days at startup |
 
 ## Tools
 
-96 tools across the following areas (use `ToolSearch` with the `+roslyn` prefix in Claude Code to discover them):
+97 tools across the following areas (use `ToolSearch` with the `+roslyn` prefix in Claude Code to discover them):
 
 **Structure** — `get_solution_structure`, `get_project_structure`, `get_file_outline`, `get_types_in_file`, `get_dependency_graph`, `get_full_context`, `get_overloads`, `get_constructor_parameters`, `get_xml_documentation`, `get_accessibility`
 
@@ -149,7 +156,7 @@ default below.
 
 **Dependency graph** — `graph_add_node`, `graph_add_edge`, `graph_remove_node`, `graph_query_neighbors`, `graph_query_path`, `graph_query_subgraph`, `graph_impact`, `graph_rebuild`, `graph_stats`, `graph_visualize`
 
-**Session / config** — `session_start`, `session_end`, `session_list`, `set_solution_path`, `config_get`, `config_set`, `config_list`, `tool_enabled`, `validate_text`
+**Session / config** — `session_start`, `session_end`, `session_list`, `set_solution_path`, `set_solution_root`, `config_get`, `config_set`, `config_list`, `tool_enabled`, `validate_text`
 
 ## Runtime state
 

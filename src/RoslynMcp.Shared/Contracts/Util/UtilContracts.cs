@@ -121,6 +121,22 @@ public record SetSolutionPathResponse(
     int DocumentCount,
     string? PreviousSolutionPath = null);
 
+// -- set_solution_root --
+
+public record SetSolutionRootRequest(
+    [property: Required] string RootPath,
+    bool WarmUp = false);
+
+public record SetSolutionRootResponse(
+    string RootPath,
+    string SolutionPath,
+    int ProjectCount,
+    int DocumentCount,
+    bool Changed,
+    bool FollowEnabled,
+    string? PreviousSolutionPath = null,
+    string? Message = null);
+
 // ── config_get ──
 
 public record ConfigGetRequest(

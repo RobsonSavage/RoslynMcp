@@ -1,0 +1,40 @@
+{
+  "description": "Follow the active Claude Code workspace after directory changes.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__roslyn__(?!set_solution_root$).*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "roslyn",
+            "tool": "set_solution_root",
+            "input": {
+              "rootPath": "${cwd}",
+              "warmUp": false
+            },
+            "timeout": 120,
+            "statusMessage": "Following the Claude Code workspace in RoslynMcp"
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "roslyn",
+            "tool": "set_solution_root",
+            "input": {
+              "rootPath": "${new_cwd}",
+              "warmUp": false
+            },
+            "timeout": 120,
+            "statusMessage": "Following the Claude Code workspace in RoslynMcp"
+          }
+        ]
+      }
+    ]
+  }
+}

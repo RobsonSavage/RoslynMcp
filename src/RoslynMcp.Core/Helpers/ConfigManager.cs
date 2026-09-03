@@ -33,6 +33,7 @@ public class ConfigManager
         new("graph.auto_rebuild", "bool", "true", "Rebuild the dependency graph after every solution load"),
         new("workspace.idle_unload_minutes", "int", "30", "Unload the workspace after N minutes idle (0 = never)"),
         new("workspace.watch_files", "bool", "true", "Refresh the workspace from disk when source files change"),
+        new("workspace.follow_roots", "bool", "true", "Allow client hooks to follow workspace roots"),
     };
 
     private static readonly Dictionary<string, ConfigDefinition> s_definitionMap =

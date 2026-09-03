@@ -343,7 +343,41 @@ public class UtilTools
         }
     }
 
-    // ── 10. config_get ──
+    // ── 10. set_solution_root ──
+
+    [McpServerTool(Name = "set_solution_root"), Description("Discover and follow the solution in a client workspace root unless solution selection is pinned")]
+    public async Task<CallToolResult> SetSolutionRoot(
+        [Description("Absolute path to the client's current workspace directory")] string rootPath,
+        [Description("Warm up compilations after loading")] bool warmUp = false,
+        CancellationToken ct = default)
+    {
+        var sw = Stopwatch.StartNew();
+        bool isError = false;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(rootPath)) return _mapper.Error("rootPath is required");
+            var request = new SetSolutionRootRequest(rootPath, warmUp);
+            var result = await _service.SetSolutionRootAsync(request, ct);
+            if (!result.IsSuccess)
+            {
+                isError = true;
+                return _mapper.Error(result.Error?.Message ?? "Unknown error");
+            }
+            return _mapper.Success(result.Value);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            isError = true;
+            return _mapper.Exception(ex, _logger);
+        }
+        finally
+        {
+            _metrics.Record("set_solution_root", sw.Elapsed, isError);
+        }
+    }
+
+    // ── 11. config_get ──
 
     [McpServerTool(Name = "config_get"), Description("Get the current value of a configuration setting")]
     public async Task<CallToolResult> ConfigGet(
@@ -376,7 +410,7 @@ public class UtilTools
         }
     }
 
-    // ── 11. config_set ──
+    // ── 12. config_set ──
 
     [McpServerTool(Name = "config_set"), Description("Set a configuration value")]
     public async Task<CallToolResult> ConfigSet(
@@ -411,7 +445,7 @@ public class UtilTools
         }
     }
 
-    // ── 12. config_list ──
+    // ── 13. config_list ──
 
     [McpServerTool(Name = "config_list"), Description("List all configuration entries with their current values")]
     public async Task<CallToolResult> ConfigList(
@@ -442,7 +476,7 @@ public class UtilTools
         }
     }
 
-    // ── 13. tool_enabled ──
+    // ── 14. tool_enabled ──
 
     [McpServerTool(Name = "tool_enabled"), Description("Check or toggle whether a specific tool is enabled")]
     public async Task<CallToolResult> ToolEnabled(
