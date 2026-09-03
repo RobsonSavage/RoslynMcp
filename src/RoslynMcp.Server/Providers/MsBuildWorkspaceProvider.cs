@@ -38,6 +38,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     private readonly ConcurrentDictionary<string, byte> _dirtyDocuments = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _syncLock = new(1, 1);
     private FileSystemWatcher? _watcher;
+    private WorkspaceEventRegistration? _workspaceEvents;
     private volatile bool _structuralChangePending;
 
     // Past this many changed files a per-document reload is slower than reopening the solution,
@@ -61,7 +62,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         _solutionDir = solutionDir;
         _solutionPath = solutionPath;
         _logger = logger;
-        _workspace.WorkspaceChanged += OnWorkspaceChanged;
+        _workspaceEvents = _workspace.RegisterWorkspaceChangedHandler(OnWorkspaceChanged);
     }
 
     /// <summary>
@@ -294,12 +295,12 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
 
             // Swap
             var oldWorkspace = _workspace;
-            oldWorkspace.WorkspaceChanged -= OnWorkspaceChanged;
+            _workspaceEvents?.Dispose();
 
             _workspace = newWorkspace;
             _solutionDir = newSolutionDir;
             _solutionPath = fullPath;
-            _workspace.WorkspaceChanged += OnWorkspaceChanged;
+            _workspaceEvents = _workspace.RegisterWorkspaceChangedHandler(OnWorkspaceChanged);
             _initialized = true;
             RebuildDocumentCache();
 
@@ -589,7 +590,8 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             {
                 oldWorkspace = _workspace;
                 oldSolution = oldWorkspace.CurrentSolution;
-                oldWorkspace.WorkspaceChanged -= OnWorkspaceChanged;
+                _workspaceEvents?.Dispose();
+                _workspaceEvents = null;
 
                 // Swap in an empty workspace rather than nulling the field: every public member
                 // already guards on _initialized, so this keeps the existing null semantics.
@@ -691,7 +693,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         _idleCts?.Cancel();
         _idleCts?.Dispose();
         _watcher?.Dispose();
-        _workspace.WorkspaceChanged -= OnWorkspaceChanged;
+        _workspaceEvents?.Dispose();
         _workspace.Dispose();
         _reloadLock.Dispose();
         _ensureLock.Dispose();
@@ -702,7 +704,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     /// <summary>Solution directory for path resolution and security checks.</summary>
     public string SolutionDirectory => _solutionDir;
 
-    private void OnWorkspaceChanged(object? sender, WorkspaceChangeEventArgs e)
+    private void OnWorkspaceChanged(WorkspaceChangeEventArgs e)
     {
         if (e.Kind == WorkspaceChangeKind.SolutionChanged
             || e.Kind == WorkspaceChangeKind.SolutionReloaded
