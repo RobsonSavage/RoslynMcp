@@ -18,7 +18,7 @@ public class MemoryServiceTests : IAsyncDisposable, IAsyncLifetime
     {
         _dbPath = Path.Combine(Path.GetTempPath(), "RoslynMcpTests", Guid.NewGuid().ToString(), "test.db");
         _pool = new SqliteConnectionPool(_dbPath, logger: _logger);
-        _service = new MemoryService(_pool, _dbPath, _logger);
+        _service = new MemoryService(_pool, _logger);
     }
 
     public async Task InitializeAsync()
@@ -291,7 +291,7 @@ public class MemoryServiceTests : IAsyncDisposable, IAsyncLifetime
         await using var pool2 = new SqliteConnectionPool(dbPath2, logger: _logger);
         var runner2 = new MigrationRunner(pool2, dbPath2, new IMigration[] { new V1_MemoryTables() }, _logger);
         await runner2.RunAsync();
-        var service2 = new MemoryService(pool2, dbPath2, _logger);
+        var service2 = new MemoryService(pool2, _logger);
 
         // Import
         var importResult = await service2.ImportAsync(new MemoryImportRequest(Data: json));

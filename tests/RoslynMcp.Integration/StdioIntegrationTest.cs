@@ -28,6 +28,8 @@ public sealed class ServerFixture : IAsyncLifetime
     /// <summary>Number of tools reported by tools/list.</summary>
     public int ToolCount { get; private set; }
 
+    public string? SolutionPath { get; private set; }
+
     public async Task InitializeAsync()
     {
         try
@@ -35,6 +37,7 @@ public sealed class ServerFixture : IAsyncLifetime
             var solutionDir = FindSolutionDir();
             var serverExe = FindServerExe(solutionDir);
             var solutionPath = Path.Combine(solutionDir, "RoslynMcp.sln");
+            SolutionPath = solutionPath;
 
             if (!File.Exists(serverExe))
             {
@@ -455,5 +458,37 @@ public class StdioIntegrationTest : IClassFixture<ServerFixture>
 
         using var parsed = JsonDocument.Parse(text);
         Assert.True(parsed.RootElement.TryGetProperty("totalEntries", out _));
+    }
+
+    [Fact]
+    public async Task SetSolutionPath_SwitchesTheCompleteRuntimeContext()
+    {
+        EnsureReady();
+        Assert.NotNull(_server.SolutionPath);
+
+        var result = await _server.SendRequestAsync("tools/call", new
+        {
+            name = "set_solution_path",
+            arguments = new
+            {
+                solutionPath = _server.SolutionPath,
+                warmUp = false
+            }
+        }, timeoutMs: 120_000);
+
+        Assert.NotNull(result);
+        var text = result.Value.GetProperty("content")[0].GetProperty("text").GetString()!;
+        using var parsed = JsonDocument.Parse(text);
+        Assert.Equal(
+            Path.GetFullPath(_server.SolutionPath),
+            parsed.RootElement.GetProperty("solutionPath").GetString());
+
+        var stats = await _server.SendRequestAsync("tools/call", new
+        {
+            name = "memory_stats",
+            arguments = new { }
+        });
+        Assert.NotNull(stats);
+        Assert.False(stats.Value.TryGetProperty("isError", out var isError) && isError.GetBoolean());
     }
 }

@@ -5,6 +5,7 @@ using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Core.Helpers;
 using RoslynMcp.Core.Services;
 using RoslynMcp.Shared;
+using RoslynMcp.Shared.Contracts.Util;
 
 namespace RoslynMcp.Core.Tests.Helpers;
 
@@ -242,4 +243,13 @@ public sealed class TestWorkspaceProvider : IWorkspaceProvider
 
     public Task<bool> ReloadSolutionAsync(string solutionPath, bool warmUp = false, CancellationToken ct = default)
         => throw new NotSupportedException("ReloadSolutionAsync is not supported in test workspace");
+}
+
+public sealed class TestSolutionContextSwitcher : ISolutionContextSwitcher
+{
+    public Task<SetSolutionPathResponse> SwitchAsync(
+        string solutionPath,
+        bool warmUp,
+        CancellationToken ct = default) =>
+        throw new NotSupportedException("Solution switching is not supported by this test");
 }

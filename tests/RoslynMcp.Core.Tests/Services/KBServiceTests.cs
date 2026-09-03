@@ -18,7 +18,7 @@ public class KBServiceTests : IAsyncDisposable, IAsyncLifetime
     {
         _dbPath = Path.Combine(Path.GetTempPath(), "RoslynMcpTests", Guid.NewGuid().ToString(), "test.db");
         _pool = new SqliteConnectionPool(_dbPath, logger: _logger);
-        _service = new KBService(_pool, _dbPath, _logger);
+        _service = new KBService(_pool, _logger);
     }
 
     public async Task InitializeAsync()

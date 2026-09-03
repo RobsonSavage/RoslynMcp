@@ -12,15 +12,13 @@ public class KBService : IAsyncDisposable
 {
     private readonly ISqliteConnectionPool _pool;
     private readonly ILogger _logger;
-    private readonly string _dbPath;
     private readonly SemaphoreSlim _ftsInitSemaphore = new(1, 1);
     private bool _ftsAvailable;
     private bool _ftsInitialized;
 
-    public KBService(ISqliteConnectionPool pool, string dbPath, ILogger logger)
+    public KBService(ISqliteConnectionPool pool, ILogger logger)
     {
         _pool = pool;
-        _dbPath = dbPath;
         _logger = logger;
     }
 
@@ -565,7 +563,7 @@ public class KBService : IAsyncDisposable
             long dbSizeBytes = 0;
             try
             {
-                var fi = new FileInfo(_dbPath);
+                var fi = new FileInfo(_pool.DatabasePath);
                 if (fi.Exists)
                     dbSizeBytes = fi.Length;
             }

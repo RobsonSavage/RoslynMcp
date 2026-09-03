@@ -14,7 +14,7 @@ public enum ImportResult { Success, NoOp, FallbackToDefaults, Error }
 /// </summary>
 public class ConfigManager
 {
-    private readonly string _configPath;
+    private string _configPath;
     private readonly object _lock = new();
     private readonly ILogger? _logger;
     private Dictionary<string, string> _values;
@@ -45,7 +45,30 @@ public class ConfigManager
     {
         _configPath = Path.Combine(configDir, "config.json");
         _logger = logger;
-        _values = Load();
+        _values = Load(_configPath);
+    }
+
+    public string ConfigDirectory
+    {
+        get
+        {
+            lock (_lock)
+                return Path.GetDirectoryName(_configPath)!;
+        }
+    }
+
+    public void SwitchDirectory(string configDir)
+    {
+        var configPath = Path.Combine(configDir, "config.json");
+        var values = Load(configPath);
+
+        lock (_lock)
+        {
+            _configPath = configPath;
+            _values = values;
+        }
+
+        _logger?.Information("Configuration switched to {ConfigPath}", configPath);
     }
 
     public ConfigGetResponse Get(string key)
@@ -249,29 +272,29 @@ public class ConfigManager
         return "int"; // timeout.* keys default to int
     }
 
-    private Dictionary<string, string> Load()
+    private Dictionary<string, string> Load(string configPath)
     {
-        if (!File.Exists(_configPath))
+        if (!File.Exists(configPath))
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
-            var json = File.ReadAllText(_configPath, Encoding.UTF8);
+            var json = File.ReadAllText(configPath, Encoding.UTF8);
             return ParseSimpleJson(json);
         }
         catch (IOException ex)
         {
-            _logger?.Warning(ex, "Config load failed (IO): {Path}", _configPath);
+            _logger?.Warning(ex, "Config load failed (IO): {Path}", configPath);
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
         catch (JsonException ex)
         {
-            _logger?.Warning(ex, "Config load failed (parse): {Path}", _configPath);
+            _logger?.Warning(ex, "Config load failed (parse): {Path}", configPath);
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
         catch (Exception ex)
         {
-            _logger?.Error(ex, "Config load failed (unexpected): {Path}", _configPath);
+            _logger?.Error(ex, "Config load failed (unexpected): {Path}", configPath);
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
     }

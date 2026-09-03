@@ -28,7 +28,7 @@ public class SmokeTest
             var structure = new StructureService(provider, helpers, logger);
             var analyze = new AnalyzeService(provider, helpers, logger);
             var refactoring = new RefactoringService(provider, helpers, logger);
-            var util = new UtilService(provider, helpers, config, logger);
+            var util = new UtilService(provider, helpers, config, new TestSolutionContextSwitcher(), logger);
 
             Assert.NotNull(search);
             Assert.NotNull(structure);

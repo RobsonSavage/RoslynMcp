@@ -20,7 +20,7 @@ public class UtilServiceTests_Context : IDisposable
         var helpers = helper.CreateHelpers(_logger);
         _tempConfigDir = configDir ?? Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         var config = new ConfigManager(_tempConfigDir);
-        return new UtilService(provider, helpers, config, _logger);
+        return new UtilService(provider, helpers, config, new TestSolutionContextSwitcher(), _logger);
     }
 
     public void Dispose()

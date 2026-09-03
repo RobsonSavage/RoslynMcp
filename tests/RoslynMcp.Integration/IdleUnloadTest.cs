@@ -137,7 +137,7 @@ public sealed class IdleUnloadTest
     {
         await using var provider = await CreateProviderAsync();
         var docPath = ProbeDocument();
-        const int cycles = 4;
+        const int cycles = 20;
 
         var unloadedHeap = new long[cycles];
 

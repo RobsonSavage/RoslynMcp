@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.Build.Locator;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -31,15 +29,7 @@ catch (Exception ex)
 }
 var logPath = Path.Combine(logDir, $"server-{DateTime.UtcNow:yyyyMMdd}.log");
 
-var logger = new LoggerConfiguration()
-    .MinimumLevel.Information()
-    .WriteTo.File(
-        logPath,
-        rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 7,
-        fileSizeLimitBytes: 50 * 1024 * 1024)
-    .WriteTo.Console(Serilog.Events.LogEventLevel.Warning, standardErrorFromLevel: Serilog.Events.LogEventLevel.Verbose)
-    .CreateLogger();
+var logger = ServerLogging.CreateLogger(logPath);
 
 Log.Logger = logger;
 logger.Information("RoslynMcp Server starting");
@@ -75,49 +65,29 @@ try
         MSBuildLocator.RegisterDefaults();
     }
 
-    // ── Data directory ──
-
-    var solutionDir = Path.GetDirectoryName(Path.GetFullPath(solutionPath))!;
-    var dataDir = Path.Combine(solutionDir, ".roslyn-mcp-data");
-
-    try
-    {
-        Directory.CreateDirectory(dataDir);
-    }
-    catch (UnauthorizedAccessException)
-    {
-        // Read-only solution dir: fall back to temp
-        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(solutionDir.ToLowerInvariant()));
-        var hash = Convert.ToHexString(hashBytes)[..8].ToLowerInvariant();
-        dataDir = Path.Combine(Path.GetTempPath(), "RoslynMcp", hash);
-        Directory.CreateDirectory(dataDir);
-        logger.Warning("Solution dir read-only, using temp: {DataDir}", dataDir);
-    }
-
-    var dbPath = Path.Combine(dataDir, "roslyn-mcp.db");
-
     // ── Initialize workspace ──
 
     logger.Information("Opening solution: {SolutionPath}", solutionPath);
     await using var workspaceProvider = await MsBuildWorkspaceProvider.CreateAsync(solutionPath, logger, warmUp);
 
-    // ── Initialize SQLite + migrations ──
+    // -- Initialize solution-scoped runtime --
 
-    var configManager = new ConfigManager(dataDir);
-    var btConfig = configManager.Get("sqlite.busy_timeout_ms");
-    var busyTimeoutMs = int.TryParse(btConfig.Value ?? btConfig.DefaultValue, out var bt) ? bt : 1000;
-    var csConfig = configManager.Get("sqlite.cache_size_kb");
-    var cacheSizeKb = int.TryParse(csConfig.Value ?? csConfig.DefaultValue, out var cs) ? cs : 16000;
-    await using var pool = new SqliteConnectionPool(dbPath, logger: logger,
-        busyTimeoutMs: busyTimeoutMs, cacheSizeKb: cacheSizeKb);
     var migrations = new IMigration[]
     {
         new V1_MemoryTables(), new V2_GraphTables(), new V3_KBTables(), new V4_GraphProvenance()
     };
-    var migrationRunner = new MigrationRunner(pool, dbPath, migrations, logger);
-    var applied = await migrationRunner.RunAsync();
-    if (applied > 0)
-        logger.Information("Applied {Count} database migration(s)", applied);
+    await using var solutionRuntime = await SolutionRuntime.CreateAsync(
+        workspaceProvider,
+        solutionPath,
+        migrations,
+        logger);
+    var configManager = solutionRuntime.Config;
+
+    var retentionConfig = configManager.Get("logging.file_retention_days");
+    var retentionDays = int.TryParse(retentionConfig.Value, out var rd) ? rd
+        : int.TryParse(retentionConfig.DefaultValue, out var rdd) ? rdd
+        : 7;
+    ServerLogging.Prune(logDir, retentionDays, logger);
 
     // ── Build host with DI ──
 
@@ -128,7 +98,8 @@ try
     // Infrastructure singletons
     builder.Services.AddSingleton<Serilog.ILogger>(logger);
     builder.Services.AddSingleton<IWorkspaceProvider>(workspaceProvider);
-    builder.Services.AddSingleton<ISqliteConnectionPool>(pool);
+    builder.Services.AddSingleton<ISqliteConnectionPool>(solutionRuntime);
+    builder.Services.AddSingleton<ISolutionContextSwitcher>(solutionRuntime);
     var symbolResolver = new SymbolResolver(logger);
     builder.Services.AddSingleton(symbolResolver);
     builder.Services.AddSingleton<IWorkspaceHelpers>(new WorkspaceHelpers(workspaceProvider, symbolResolver));
@@ -159,6 +130,7 @@ try
         sp.GetRequiredService<IWorkspaceProvider>(),
         sp.GetRequiredService<IWorkspaceHelpers>(),
         sp.GetRequiredService<ConfigManager>(),
+        sp.GetRequiredService<ISolutionContextSwitcher>(),
         sp.GetRequiredService<Serilog.ILogger>()));
 
     builder.Services.AddTransient(sp => new AnalyzeService(
@@ -173,17 +145,15 @@ try
 
     builder.Services.AddTransient(sp => new MemoryService(
         sp.GetRequiredService<ISqliteConnectionPool>(),
-        dbPath,
         sp.GetRequiredService<Serilog.ILogger>()));
 
     // Singleton so the stale/rebuilt version counters mean something: as a transient every tool
     // call got a fresh instance, which reported the graph stale unconditionally.
-    var graphService = new GraphService(pool, logger, workspaceProvider);
+    var graphService = new GraphService(solutionRuntime, logger, workspaceProvider);
     builder.Services.AddSingleton(graphService);
 
     builder.Services.AddTransient(sp => new KBService(
         sp.GetRequiredService<ISqliteConnectionPool>(),
-        dbPath,
         sp.GetRequiredService<Serilog.ILogger>()));
 
     builder.Services.AddTransient(sp => new ApolloService(
@@ -224,6 +194,7 @@ try
         {
             try
             {
+                using var contextLease = await solutionRuntime.EnterReadAsync();
                 var result = await graphService.RebuildAsync(new GraphRebuildRequest(FullRebuild: true));
                 if (!result.IsSuccess)
                     logger.Warning("Dependency graph rebuild failed: {Error}", result.Error?.Message);
@@ -254,12 +225,22 @@ try
         .WithToolsFromAssembly()
         .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, ct) =>
         {
-            // Single choke point for all tools: reload the workspace if it was idle-unloaded,
-            // and hold the in-flight count for the duration so the sweep cannot unload underneath.
-            var needsWorkspace = NeedsWorkspace(context.Params?.Name);
-            await workspaceProvider.BeginRequestAsync(needsWorkspace, ct);
+            var toolName = context.Params?.Name;
+            var needsWorkspace = NeedsWorkspace(toolName);
+            IDisposable? contextLease = null;
+            var requestEntered = false;
             try
             {
+                // set_solution_path takes the runtime write lease inside SolutionRuntime. Every
+                // other tool takes a read lease so no caller can observe a mixed solution/database.
+                if (!string.Equals(toolName, "set_solution_path", StringComparison.Ordinal))
+                    contextLease = await solutionRuntime.EnterReadAsync(ct);
+
+                // Reload the workspace if it was idle-unloaded, and hold the in-flight count for
+                // the duration so the sweep cannot unload underneath this call.
+                await workspaceProvider.BeginRequestAsync(needsWorkspace, ct);
+                requestEntered = true;
+
                 // Push any on-disk edits into the workspace before the tool reads it. Held inside
                 // the in-flight guard so a sweep cannot unload mid-refresh.
                 if (needsWorkspace)
@@ -269,7 +250,9 @@ try
             }
             finally
             {
-                workspaceProvider.ExitRequest();
+                if (requestEntered)
+                    workspaceProvider.ExitRequest();
+                contextLease?.Dispose();
             }
         }));
 

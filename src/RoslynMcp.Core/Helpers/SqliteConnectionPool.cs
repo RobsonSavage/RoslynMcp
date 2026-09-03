@@ -16,7 +16,10 @@ public interface IPoolDiagnostics
     bool WriterInUse { get; }
 }
 
-public interface ISqliteConnectionPool : IConnectionLease, IPoolDiagnostics, IAsyncDisposable { }
+public interface ISqliteConnectionPool : IConnectionLease, IPoolDiagnostics, IAsyncDisposable
+{
+    string DatabasePath { get; }
+}
 
 /// <summary>
 /// Wraps a SqliteConnection with automatic lock release on dispose.
@@ -72,6 +75,7 @@ public sealed class PooledConnection : IAsyncDisposable, IDisposable
 /// </summary>
 public sealed class SqliteConnectionPool : ISqliteConnectionPool
 {
+    private readonly string _dbPath;
     private readonly string _connectionString;
     private readonly AsyncReaderWriterLock _rwLock = new();
     private readonly SemaphoreSlim _readerSlots;
@@ -95,6 +99,7 @@ public sealed class SqliteConnectionPool : ISqliteConnectionPool
     public SqliteConnectionPool(string dbPath, int maxReaders = 4, ILogger? logger = null,
         int busyTimeoutMs = 1000, int cacheSizeKb = 16000)
     {
+        _dbPath = dbPath;
         _readerSlots = new SemaphoreSlim(maxReaders, maxReaders);
         _logger = logger ?? Log.Logger;
         _busyTimeoutMs = busyTimeoutMs;
@@ -126,6 +131,7 @@ public sealed class SqliteConnectionPool : ISqliteConnectionPool
 
     public int ActiveReaderCount => _activeReaders;
     public bool WriterInUse => _writerInUse != 0;
+    public string DatabasePath => _dbPath;
 
     internal bool IsDisposed => _disposed != 0;
 

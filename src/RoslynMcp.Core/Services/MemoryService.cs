@@ -11,12 +11,10 @@ public class MemoryService
 {
     private readonly ISqliteConnectionPool _pool;
     private readonly ILogger _logger;
-    private readonly string _dbPath;
 
-    public MemoryService(ISqliteConnectionPool pool, string dbPath, ILogger logger)
+    public MemoryService(ISqliteConnectionPool pool, ILogger logger)
     {
         _pool = pool;
-        _dbPath = dbPath;
         _logger = logger;
     }
 
@@ -662,7 +660,7 @@ public class MemoryService
             long dbSizeBytes = 0;
             try
             {
-                var fi = new FileInfo(_dbPath);
+                var fi = new FileInfo(_pool.DatabasePath);
                 if (fi.Exists)
                     dbSizeBytes = fi.Length;
             }

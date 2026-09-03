@@ -53,6 +53,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
 
     /// <summary>Path of the solution this provider loads, retained across an idle unload.</summary>
     public string SolutionPath => _solutionPath;
+    internal string? WatchedDirectory => _watcher?.Path;
 
     public event EventHandler<SolutionChangedEventArgs>? SolutionChanged;
 
@@ -272,6 +273,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             // Sampled before the load so changes arriving during it are not consumed by it.
             var structuralPending = _structuralChangePending;
             var newSolutionDir = Path.GetDirectoryName(fullPath)!;
+            var solutionDirectoryChanged = !PathsEqual(_solutionDir, newSolutionDir);
             var newWorkspace = MSBuildWorkspace.Create();
 
             _logger.Information("Switching solution to: {SolutionPath}", fullPath);
@@ -296,6 +298,12 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             // Swap
             var oldWorkspace = _workspace;
             _workspaceEvents?.Dispose();
+            var restartWatcher = solutionDirectoryChanged && _watcher != null;
+            if (restartWatcher)
+            {
+                _watcher!.Dispose();
+                _watcher = null;
+            }
 
             _workspace = newWorkspace;
             _solutionDir = newSolutionDir;
@@ -303,6 +311,11 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             _workspaceEvents = _workspace.RegisterWorkspaceChangedHandler(OnWorkspaceChanged);
             _initialized = true;
             RebuildDocumentCache();
+
+            if (solutionDirectoryChanged)
+                _dirtyDocuments.Clear();
+            if (restartWatcher)
+                StartFileWatcher();
 
             // Everything on disk was just read, so any structural change already seen is applied.
             if (structuralPending) _structuralChangePending = false;

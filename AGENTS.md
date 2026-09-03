@@ -96,8 +96,8 @@ Notes on that shape:
 
 ## Workspace lifecycle
 
-`MsBuildWorkspaceProvider` is a singleton holding one `MSBuildWorkspace`. Three behaviours are
-layered on it, and all three are coordinated through the CallTool filter in `Program.cs`:
+`MsBuildWorkspaceProvider` is a singleton holding one `MSBuildWorkspace`. Four behaviours are
+coordinated through the CallTool filter and `SolutionRuntime`:
 
 - **Idle unload.** After `workspace.idle_unload_minutes` with no tool call, the solution is dropped
   and the heap compacted. The next call reloads it, which costs whatever the original load cost.
@@ -105,6 +105,9 @@ layered on it, and all three are coordinated through the CallTool filter in `Pro
   documents, or reloads the whole solution for structural changes. See "Keeping the index current"
   in the README.
 - **In-flight counting.** `_inFlight` stops a sweep unloading under a running call.
+- **Solution switching.** `SolutionRuntime` takes an exclusive lease while it switches the
+  workspace, configuration and routed SQLite pool. Other tools and background graph rebuilds take
+  read leases, so they cannot observe a mixed solution context.
 
 Rules if you touch this:
 
@@ -115,6 +118,9 @@ Rules if you touch this:
 - `NeedsWorkspace(toolName)` in `Program.cs` decides whether a tool forces a reload. Memory, KB,
   session and config tools do not need a solution; anything else does. Add new prefixes there
   rather than making the tool tolerate an unloaded workspace.
+- Every tool except `set_solution_path` takes `SolutionRuntime.EnterReadAsync()` in the CallTool
+  filter. `set_solution_path` takes the write lease inside `SolutionRuntime.SwitchAsync`; taking a
+  read lease around it deadlocks the switch.
 - Do not add work to the watcher event handlers. They record a path and return; all reloading
   happens on the request thread.
 
@@ -122,6 +128,10 @@ Rules if you touch this:
 
 `SqliteConnectionPool` hands out reader and writer leases; writers are serialised. `PRAGMA
 foreign_keys=ON`, so `GraphEdges` rows constrain `GraphNodes` deletes.
+
+Database-backed services receive `SolutionRuntime` through `ISqliteConnectionPool`. Read the
+active path from `ISqliteConnectionPool.DatabasePath`; capturing a startup database path breaks
+`set_solution_path` isolation.
 
 Migrations are append-only. To change the schema:
 
@@ -181,8 +191,9 @@ meaningless if another class is loading a solution alongside it.
   real server without `--solution-path` and clears `ROSLYNMCP_SOLUTION_PATH` to cover this path.
 - **Environment variables are captured at process spawn.** Changing one does not reach a running
   server; the Claude session has to restart.
-- **Log retention does not prune.** `retainedFileCountLimit: 7` does not span the `_NNN` suffixed
-  files that multiple concurrent servers produce.
+- **Serilog sink retention is per file sequence.** Concurrent servers create `_NNN` sequences, so
+  `ServerLogging.Prune` applies age-based retention across all `server-*.log` files at startup.
+  Log entries include `pid` so concurrent server output can be attributed to a process.
 - **Services registered `AddTransient` get a new instance per tool call.** Any counter or cache on
   a service field silently resets. `GraphService` is a singleton for exactly this reason.
 

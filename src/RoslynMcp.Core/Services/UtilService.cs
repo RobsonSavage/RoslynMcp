@@ -16,13 +16,20 @@ public class UtilService
     private readonly IWorkspaceProvider _workspace;
     private readonly IWorkspaceHelpers _helpers;
     private readonly ConfigManager _config;
+    private readonly ISolutionContextSwitcher _solutionContextSwitcher;
     private readonly ILogger _logger;
 
-    public UtilService(IWorkspaceProvider workspace, IWorkspaceHelpers helpers, ConfigManager config, ILogger logger)
+    public UtilService(
+        IWorkspaceProvider workspace,
+        IWorkspaceHelpers helpers,
+        ConfigManager config,
+        ISolutionContextSwitcher solutionContextSwitcher,
+        ILogger logger)
     {
         _workspace = workspace;
         _helpers = helpers;
         _config = config;
+        _solutionContextSwitcher = solutionContextSwitcher;
         _logger = logger;
     }
 
@@ -308,8 +315,6 @@ public class UtilService
     public async Task<Result<SetSolutionPathResponse>> SetSolutionPathAsync(
         SetSolutionPathRequest request, CancellationToken ct = default)
     {
-        var previousPath = _workspace.CurrentSolution?.FilePath;
-
         var fullPath = Path.GetFullPath(request.SolutionPath);
         if (!File.Exists(fullPath))
             return Result<SetSolutionPathResponse>.Fail($"Solution file not found: {fullPath}");
@@ -319,15 +324,7 @@ public class UtilService
             !ext.Equals(".slnx", StringComparison.OrdinalIgnoreCase))
             return Result<SetSolutionPathResponse>.Fail($"Not a solution file (expected .sln or .slnx): {fullPath}");
 
-        _logger.Information("set_solution_path: switching from {Old} to {New}", previousPath, fullPath);
-
-        await _workspace.ReloadSolutionAsync(fullPath, request.WarmUp, ct).ConfigureAwait(false);
-
-        var solution = _workspace.CurrentSolution;
-        var projectCount = solution?.ProjectIds.Count ?? 0;
-        var documentCount = solution?.Projects.Sum(p => p.DocumentIds.Count) ?? 0;
-
-        return new SetSolutionPathResponse(fullPath, projectCount, documentCount, previousPath);
+        return await _solutionContextSwitcher.SwitchAsync(fullPath, request.WarmUp, ct).ConfigureAwait(false);
     }
 
     // ── 10. config_get ──
