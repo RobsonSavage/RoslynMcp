@@ -33,31 +33,15 @@ server at startup, and the tool that would have fixed it does not exist yet.
 
 ## Step 1: User-Local Installation
 
-### Create Publish Script
+### Use the repository publish script
 
-Create `publish-local.ps1` in `Solution/Tools/RoslynMcp/`:
+The repository's `publish-local.ps1` publishes the server and then runs
+`configure-clients.ps1`. The configuration step:
 
-```powershell
-# Build and publish to user-local directory
-$publishDir = Join-Path $env:LOCALAPPDATA "RoslynMcp"
-$projectPath = "src\RoslynMcp.Server\RoslynMcp.Server.csproj"
-
-Write-Host "Building RoslynMcp.Server (Release)..."
-dotnet publish $projectPath `
-    -c Release `
-    -o $publishDir `
-    --self-contained false `
-    -p:PublishSingleFile=false
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "Published to: $publishDir" -ForegroundColor Green
-    Write-Host "`nExecutable location:" -ForegroundColor Cyan
-    Write-Host "  $publishDir\RoslynMcp.Server.exe"
-} else {
-    Write-Host "Build failed!" -ForegroundColor Red
-    exit 1
-}
-```
+- Creates or updates the user-scoped `roslyn` MCP entry for Claude Code and Codex.
+- Whitelists `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` for the Codex stdio server.
+- Preserves an existing valid user-scoped bootstrap solution.
+- Otherwise sets the bootstrap solution to this clone's `RoslynMcp.sln`.
 
 ### Run Initial Publish
 
@@ -66,6 +50,9 @@ From the RoslynMcp clone root:
 ```powershell
 .\publish-local.ps1
 ```
+
+Restart Claude Code and Codex after the script completes. Environment variables and MCP
+configuration are captured when each client starts.
 
 This installs RoslynMcp.Server to:
 ```
@@ -82,30 +69,40 @@ This installs RoslynMcp.Server to:
 
 ## Step 2: Configure the MCP Server Without a Solution Pin
 
-Configure the server under the name `roslyn`. Launch the installed executable without
-`--solution-path`, and make sure `ROSLYNMCP_SOLUTION_PATH` is not set. The server discovers the
-solution from the client process working directory at startup.
+`publish-local.ps1` configures the server under the name `roslyn`. It launches the
+installed executable without `--solution-path`; make sure `ROSLYNMCP_SOLUTION_PATH`
+is not set. The server discovers the solution from the client process working directory at startup.
 
-For Claude Code, add or update the `roslyn` entry in `~/.claude.json`:
+The generated Claude Code entry in `~/.claude.json` has this shape:
 
 ```json
 {
   "mcpServers": {
     "roslyn": {
       "type": "stdio",
-      "command": "powershell.exe",
-      "args": [
-        "-NoProfile",
-        "-Command",
-        "& (Join-Path $env:LOCALAPPDATA 'RoslynMcp\\RoslynMcp.Server.exe')"
-      ],
+      "command": "cmd",
+      "args": ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"],
+      "env": {
+        "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH": "${ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}"
+      },
       "timeout": 120000
     }
   }
 }
 ```
 
-Restart the client after changing MCP configuration.
+The generated Codex entry in `~/.codex/config.toml` has this shape:
+
+```toml
+[mcp_servers.roslyn]
+command = "cmd"
+args = ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"]
+env_vars = ["ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"]
+tool_timeout_sec = 60
+startup_timeout_sec = 120
+```
+
+Restart the clients after changing MCP configuration.
 
 ## Step 3: Install Workspace-Following Support
 
@@ -409,7 +406,7 @@ if (Test-Path $d) {
 
 # 6. Verify (see Check Version below)
 
-# 7. Restart all Claude Code instances
+# 7. Restart all Claude Code and Codex instances
 ```
 
 Steps 2 and 4 are not optional:

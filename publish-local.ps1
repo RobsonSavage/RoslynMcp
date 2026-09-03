@@ -1,4 +1,7 @@
 # Build and publish to user-local directory
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
 $publishDir = Join-Path $env:LOCALAPPDATA "RoslynMcp"
 $projectPath = "src\RoslynMcp.Server\RoslynMcp.Server.csproj"
 
@@ -15,5 +18,13 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "  $publishDir\RoslynMcp.Server.exe"
 } else {
     Write-Host "Build failed!" -ForegroundColor Red
+    exit 1
+}
+
+try {
+    & (Join-Path $PSScriptRoot "configure-clients.ps1")
+}
+catch {
+    Write-Error "Server published, but client configuration failed: $($_.Exception.Message)"
     exit 1
 }
