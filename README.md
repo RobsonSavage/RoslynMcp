@@ -230,13 +230,94 @@ server falls back to `%TEMP%\RoslynMcp\<hash of solution dir>\` and logs a warni
 resolves its own solution, so it gets its own state and concurrent sessions don't collide. The
 whole directory is git-ignored.
 
-## Updating
+## Updating a workstation
 
-After pulling server changes, re-publish and restart Claude Code and Codex:
+The clients run `%LOCALAPPDATA%\RoslynMcp\RoslynMcp.Server.exe`, not your clone, so pulling
+source changes has no effect until you re-publish. Run every command from the root of the clone -
+`publish-local.ps1` resolves the project by relative path.
 
 ```powershell
+# 1. Get the change
+git pull
+
+# 2. Close Claude Code and Codex, then confirm nothing still holds the exe
+Get-Process RoslynMcp.Server -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 3. Keep a rollback copy
+$d = Join-Path $env:LOCALAPPDATA 'RoslynMcp'
+if (Test-Path $d) { Copy-Item $d "$d.bak" -Recurse -Force }
+
+# 4. Clean the install directory, preserving log history
+if (Test-Path $d) {
+    Get-ChildItem $d -Force |
+        Where-Object { $_.Name -notin @('logs','extension.log') } |
+        Remove-Item -Recurse -Force
+}
+
+# 5. Re-publish (this also re-runs configure-clients.ps1)
 .\publish-local.ps1
+
+# 6. Restart Claude Code and Codex
 ```
+
+Steps 2 and 4 are the ones people skip and regret:
+
+- **Step 2**: with a client still running, the exe is locked, `dotnet publish` fails partway, and
+  you are left with new DLLs beside an old exe - which fails later, in confusing ways.
+- **Step 4**: `dotnet publish -o` overwrites same-named files but never deletes orphans, so the
+  install directory accumulates stale assemblies across upgrades.
+
+If step 5 fails, roll back with
+`Remove-Item $d -Recurse -Force; Rename-Item "$d.bak" $d`. Delete the `.bak` once the new build
+looks right.
+
+### What the re-publish changes
+
+`publish-local.ps1` calls `configure-clients.ps1`, which rewrites the user-scoped MCP entries in
+`~/.claude.json` and `~/.codex/config.toml` in place. It is idempotent: an entry that is already
+current is left alone, and an existing `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` that points at a real
+file is preserved rather than repointed at this clone. Nothing else in those files is touched.
+
+Both clients read MCP configuration only at startup, so the restart in step 6 is what actually
+picks up the new server. Per-solution state in `.roslyn-mcp-data\` is untouched by an update.
+
+### Verify the update landed
+
+The server has no `--version` flag - it resolves a solution first and exits non-zero if it cannot.
+Read the versions out of the install directory instead:
+
+```powershell
+$d = Join-Path $env:LOCALAPPDATA 'RoslynMcp'
+Get-ChildItem $d -Filter 'ModelContextProtocol*.dll' |
+    Select-Object Name, @{n='Version';e={$_.VersionInfo.ProductVersion}}
+```
+
+Both entries must read `2.0.0`. A `0.8.0-preview.1` means the install is stale no matter what
+`git log` says, because the running server loads from this directory and not from your clone.
+Then, inside a restarted client, call `get_workspace_status` and check it reports the solution you
+expect.
+
+### Updating the workspace-follow plugin
+
+The plugin is distributed through the GitHub marketplace, separately from the published server, so
+`publish-local.ps1` does not update it. Refresh it from inside Claude Code and restart:
+
+```text
+/plugin marketplace update roslyn-mcp
+```
+
+Then restart Claude Code. The `/plugin` menu does the same thing interactively if you would rather
+see what is installed first.
+
+For Codex, re-run the two install commands (`codex plugin marketplace add RobsonSavage/RoslynMcp`
+then `codex plugin add roslyn-workspace-follow@roslyn-mcp`), re-trust the hook if prompted, and
+start a new thread.
+
+### If the SDK moved on
+
+`Microsoft.Extensions.Hosting 10.0.10` sets the floor: an older SDK fails at restore. `global.json`
+pins `10.0.100` with `rollForward: latestMinor`, so a workstation on .NET 10.0.1xx is fine and one
+still on .NET 9 is not.
 
 ## Docs
 
