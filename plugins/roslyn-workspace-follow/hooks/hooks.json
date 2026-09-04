@@ -11,7 +11,8 @@
             "tool": "set_solution_root",
             "input": {
               "rootPath": "${cwd}",
-              "warmUp": false
+              "warmUp": false,
+              "hookOutput": true
             },
             "timeout": 120,
             "statusMessage": "Following the Codex workspace in RoslynMcp"

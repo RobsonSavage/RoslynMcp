@@ -515,4 +515,39 @@ public class StdioIntegrationTest : IClassFixture<ServerFixture>
         Assert.Equal(Path.GetFullPath(_server.SolutionPath), parsed.RootElement.GetProperty("solutionPath").GetString());
         Assert.Contains("disabled", parsed.RootElement.GetProperty("message").GetString());
     }
+
+    [Fact]
+    public async Task SetSolutionRoot_ReturnsValidNoOpJsonForPreToolUseHook()
+    {
+        EnsureReady();
+        Assert.NotNull(_server.SolutionPath);
+
+        var rootPath = Path.GetDirectoryName(_server.SolutionPath)!;
+        var result = await _server.SendRequestAsync("tools/call", new
+        {
+            name = "set_solution_root",
+            arguments = new { rootPath, warmUp = false, hookOutput = true }
+        });
+
+        Assert.NotNull(result);
+        Assert.True(result.Value.TryGetProperty("content", out var content), result.Value.ToString());
+        Assert.Equal("{}", content[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void WorkspaceFollowPlugin_RequestsPreToolUseHookOutput()
+    {
+        Assert.NotNull(_server.SolutionPath);
+
+        var solutionDir = Path.GetDirectoryName(_server.SolutionPath)!;
+        var hooksPath = Path.Combine(solutionDir, "plugins", "roslyn-workspace-follow", "hooks", "hooks.json");
+        using var hooks = JsonDocument.Parse(File.ReadAllText(hooksPath));
+        var input = hooks.RootElement
+            .GetProperty("hooks")
+            .GetProperty("PreToolUse")[0]
+            .GetProperty("hooks")[0]
+            .GetProperty("input");
+
+        Assert.True(input.GetProperty("hookOutput").GetBoolean());
+    }
 }

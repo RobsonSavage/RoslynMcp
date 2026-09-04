@@ -1,6 +1,6 @@
 {
   "name": "roslyn-workspace-follow",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260904135235",
   "description": "Keeps RoslynMcp on the Codex session workspace before Roslyn tool calls.",
   "author": {
     "name": "Robson Savage",
