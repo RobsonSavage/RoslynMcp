@@ -40,6 +40,25 @@ and Codex MCP entries. It also sets `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` to this 
 `RoslynMcp.sln` when the user does not already have a valid bootstrap solution. Existing
 valid values are preserved. Restart Claude Code and Codex after publishing.
 
+Where that value lives is up to you. The script's default is the persistent *user* environment,
+because it is the one place both clients pick it up without further wiring, but the server only
+reads the variable out of its own process environment - a machine-scoped variable, one exported by
+whatever launches the client, or a literal path written straight into the client's `env` block all
+work the same. Whichever you choose, only processes started afterwards see it, which is the other
+reason the clients need restarting.
+
+To boot on a different solution, set the variable yourself before re-publishing; a value that
+already points at an existing file is preserved rather than repointed at this clone:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+    'ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH', 'D:\src\Other\Other.sln', 'User')
+```
+
+Pass `-SkipUserEnvironment` to `configure-clients.ps1` to write the MCP entries and leave the
+environment alone entirely - the right choice if you supply the variable some other way, or not
+at all. The server runs without it; it just exits when discovery finds no solution.
+
 To run tests:
 
 ```powershell
@@ -66,6 +85,19 @@ includes the environment reference:
   }
 }
 ```
+
+`${ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}` expands from the environment the client was started in, so
+it resolves to nothing when no such variable exists. A literal path is equally valid there, and is
+the simpler option if you would rather not define the variable at all:
+
+```json
+"env": {
+  "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH": "D:\\src\\Other\\Other.sln"
+}
+```
+
+`configure-clients.ps1` rewrites this entry on every publish, so a hand-edited literal is replaced
+by the reference form again unless you keep the variable defined instead.
 
 Codex receives the matching whitelist in `~/.codex/config.toml`:
 
