@@ -10,14 +10,12 @@ RoslynMcp.Server provides Roslyn-powered code analysis tools through the Model C
 
 - **User-local installation** for the binaries (works across all repos)
 - **Startup discovery** from the client's working directory
-- **A client hook plugin** for Claude Code or Codex when a session moves to another worktree
+- **Explicit, sticky selectors** when a session moves to another repository or worktree
 
-An explicit `--solution-path` or `ROSLYNMCP_SOLUTION_PATH` is a pin. It disables client workspace
-following for that server process.
-
-`ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` is the opposite: a solution to start on when discovery finds
-none, which leaves following enabled. Without it a session started outside any solution kills the
-server at startup, and the tool that would have fixed it does not exist yet.
+`--solution-path`, `ROSLYNMCP_SOLUTION_PATH`, and working-directory discovery choose only the
+initial solution. A successful `set_solution_root` or `set_solution_path` call replaces it and
+remains active until another selector succeeds. When startup finds no solution, the server starts
+unselected so those selectors remain available.
 
 ---
 
@@ -39,9 +37,8 @@ The repository's `publish-local.ps1` publishes the server and then runs
 `configure-clients.ps1`. The configuration step:
 
 - Creates or updates the user-scoped `roslyn` MCP entry for Claude Code and Codex.
-- Whitelists `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` for the Codex stdio server.
-- Preserves an existing valid user-scoped bootstrap solution.
-- Otherwise sets the bootstrap solution to this clone's `RoslynMcp.sln`.
+- Removes obsolete bootstrap forwarding from earlier installations.
+- Preserves unrelated MCP environment entries.
 
 ### Run Initial Publish
 
@@ -67,11 +64,11 @@ This installs RoslynMcp.Server to:
 
 ---
 
-## Step 2: Configure the MCP Server Without a Solution Pin
+## Step 2: Configure the MCP Server
 
-`publish-local.ps1` configures the server under the name `roslyn`. It launches the
-installed executable without `--solution-path`; make sure `ROSLYNMCP_SOLUTION_PATH`
-is not set. The server discovers the solution from the client process working directory at startup.
+`publish-local.ps1` configures the server under the name `roslyn` and launches the installed
+executable without `--solution-path`. The server discovers the solution from the client process
+working directory at startup, or starts unselected when that directory has no solution.
 
 The generated Claude Code entry in `~/.claude.json` has this shape:
 
@@ -82,9 +79,6 @@ The generated Claude Code entry in `~/.claude.json` has this shape:
       "type": "stdio",
       "command": "cmd",
       "args": ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"],
-      "env": {
-        "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH": "${ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}"
-      },
       "timeout": 120000
     }
   }
@@ -97,51 +91,36 @@ The generated Codex entry in `~/.codex/config.toml` has this shape:
 [mcp_servers.roslyn]
 command = "cmd"
 args = ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"]
-env_vars = ["ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"]
 tool_timeout_sec = 60
 startup_timeout_sec = 120
 ```
 
 Restart the clients after changing MCP configuration.
 
-## Step 3: Install Workspace-Following Support
+## Step 3: Select a Different Repository or Worktree
 
-The server returns MCP instructions asking clients to call `set_solution_root` before their first
-Roslyn call and after a workspace move. Claude Code and Codex can also install deterministic hook
-plugins from this repository.
+The startup solution remains selected across ordinary Roslyn calls. When work intentionally moves
+to another repository or worktree:
 
-### Claude Code
+1. Resolve and verify the absolute target root with `git rev-parse --show-toplevel`.
+2. Call the Roslyn MCP tool whose logical name is `set_solution_root`, with `rootPath` set to that
+   verified root and `warmUp=false`.
+3. Require a non-error response whose normalized `solutionPath` is inside the target root.
 
-```text
-/plugin marketplace add RobsonSavage/RoslynMcp
-/plugin install roslyn-workspace-follow@roslyn-mcp
-```
+Use `set_solution_path` instead when selecting an exact `.sln` or `.slnx`. Either selector can
+replace a startup or mid-session selection. `changed: false` means the requested solution was
+already selected.
 
-The plugin handles `CwdChanged` and also calls `set_solution_root(cwd)` before every Roslyn tool.
-The `PreToolUse` fallback is required because `EnterWorktree` does not emit `CwdChanged` in Claude
-Code 2.1.259. Restart Claude Code after installation. The MCP server must be named `roslyn`.
+Claude Code keeps its MCP process at the session launch directory after `EnterWorktree`, so the
+selector call is still required. OpenCode has no persistent `EnterWorktree` tool; pin file and shell
+operations to the worktree with explicit paths or `workdir`, then call the same selector. Codex and
+Gemini also use the explicit selector after a worktree handoff. Do not call it before every Roslyn
+tool; selection is sticky.
 
-### Codex
+## Optional Wrapper Script for an Exact Initial Solution
 
-```text
-codex plugin marketplace add RobsonSavage/RoslynMcp
-codex plugin add roslyn-workspace-follow@roslyn-mcp
-```
-
-Review and trust the installed hook, then start a new thread. Codex has no `CwdChanged` event, so
-the plugin calls `set_solution_root(cwd)` synchronously before every `mcp__roslyn__*` tool call.
-
-### OpenCode
-
-OpenCode 1.18.27 reads RoslynMcp's server instructions into its system prompt. It does not expose a
-plugin API that can invoke a tool on an existing MCP connection, so workspace following remains an
-agent instruction: call `set_solution_root` before the first Roslyn call and after entering another
-worktree. Starting a new OpenCode session inside each worktree remains the deterministic option.
-
-## Pinned Fallback: Wrapper Script Per Session
-
-Use the wrapper flow only when each worktree gets a separate client session and server process. It
-passes `--solution-path`, so the workspace-following plugins intentionally cannot override it.
+Use the wrapper flow when each worktree gets a separate client session and server process. It passes
+`--solution-path` to choose the initial solution; a later selector can still replace it.
 
 ### Create Wrapper Script
 
@@ -256,7 +235,7 @@ When the Roslyn MCP server is connected:
 - **Find tools**: Use `ToolSearch` with `+roslyn` prefix (e.g., `+roslyn find callers`) to discover Roslyn MCP tools
 - **C# code analysis**: Never use Grep/Glob for .cs files — use Roslyn tools only (semantic accuracy vs text matching)
 - **Workspace scope**: Roslyn loads `<YourSolution>.sln` only. Sub-solutions are NOT included. A search returning 0 results may mean the code is outside the loaded solution — verify with `get_workspace_status` before falling back to Grep.
-- **Workspace changes**: Before the first Roslyn call and after changing directory or entering a worktree, call `set_solution_root` with the absolute current workspace directory unless the server reports that following is disabled.
+- **Workspace changes**: After intentionally moving work to another repository or worktree, call `set_solution_root` with its verified absolute root and validate the returned `solutionPath`. The selection remains active until another selector succeeds.
 - **Never assume Roslyn is broken from one failed search.** Always confirm with `get_workspace_status` or a known-good query before switching to Grep.
 - **Memory layers**:
   - `memory_store(key, value)` / `memory_search` / `memory_retrieve` — context & rules. Omit `sessionId` for global, include for session-scoped.
@@ -361,9 +340,9 @@ Each separately launched client instance:
 3. The server loads that specific workspace
 4. Data is stored in `.roslyn-mcp-data/` within each worktree (separate SQLite DBs)
 
-When an existing session moves between worktrees, the Claude Code and Codex plugins call
-`set_solution_root`. The switch includes the workspace, configuration and per-solution SQLite
-database, so memory, KB and graph results change to the target solution's scope.
+When an existing session moves between worktrees, its workflow calls `set_solution_root`
+explicitly. The switch includes the workspace, configuration and per-solution SQLite database, so
+memory, KB and graph results change to the target solution's scope.
 
 ### Verify Multiple Instances
 
@@ -462,10 +441,9 @@ cat $env:TEMP\roslyn-mcp-wrapper.log | Select-String "Found solution"
 **Fix:**
 - Ensure you're running Claude Code from the correct worktree directory
 - Check that a `.sln` file exists in the directory tree
-- Check for `--solution-path` or `ROSLYNMCP_SOLUTION_PATH`; either one deliberately disables following
-- If the server did not start at all, check the working directory holds a solution, or set `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH`
-- Confirm the workspace-follow plugin is installed, enabled and trusted, then call `get_workspace_status`
-- Call `set_solution_root` with the absolute worktree directory to test the server independently of the client hook
+- Call `get_workspace_status` to see the sticky selection or unselected state
+- Call `set_solution_root` with the verified absolute worktree directory and validate its returned `solutionPath`
+- Check whether `ROSLYNMCP_SOLUTION_PATH` chose an unexpected initial solution; either selector can replace it
 
 ### Multiple Instances Conflict
 

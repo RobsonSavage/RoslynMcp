@@ -38,6 +38,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     private readonly ConcurrentDictionary<string, byte> _dirtyDocuments = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _syncLock = new(1, 1);
     private FileSystemWatcher? _watcher;
+    private bool _watcherRequested;
     private WorkspaceEventRegistration? _workspaceEvents;
     private volatile bool _structuralChangePending;
 
@@ -52,7 +53,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     public bool IsLoaded => _initialized;
 
     /// <summary>Path of the solution this provider loads, retained across an idle unload.</summary>
-    public string SolutionPath => _solutionPath;
+    public string? SolutionPath => string.IsNullOrEmpty(_solutionPath) ? null : _solutionPath;
     internal string? WatchedDirectory => _watcher?.Path;
 
     public event EventHandler<SolutionChangedEventArgs>? SolutionChanged;
@@ -71,11 +72,17 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     /// must have been called before invoking this method.
     /// </summary>
     public static async Task<MsBuildWorkspaceProvider> CreateAsync(
-        string solutionPath,
+        string? solutionPath,
         ILogger logger,
         bool warmUp = false,
         CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(solutionPath))
+        {
+            logger.Information("No solution selected at startup; waiting for set_solution_root or set_solution_path");
+            return new MsBuildWorkspaceProvider(MSBuildWorkspace.Create(), string.Empty, string.Empty, logger);
+        }
+
         var fullPath = Path.GetFullPath(solutionPath);
         if (!File.Exists(fullPath))
             throw new FileNotFoundException($"Solution not found: {fullPath}");
@@ -83,59 +90,66 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         var solutionDir = Path.GetDirectoryName(fullPath)!;
         var workspace = MSBuildWorkspace.Create();
         var provider = new MsBuildWorkspaceProvider(workspace, solutionDir, fullPath, logger);
-
-        if (fullPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+        try
         {
-            var projectPaths = ParseSlnx(fullPath, solutionDir);
-            logger.Information("Loading {Count} projects from .slnx: {SolutionPath}", projectPaths.Count, fullPath);
-            foreach (var projectPath in projectPaths)
+            if (fullPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
             {
-                var alreadyLoaded = workspace.CurrentSolution.Projects
-                    .Any(p => string.Equals(p.FilePath, projectPath, StringComparison.OrdinalIgnoreCase));
-                if (alreadyLoaded)
+                var projectPaths = ParseSlnx(fullPath, solutionDir);
+                logger.Information("Loading {Count} projects from .slnx: {SolutionPath}", projectPaths.Count, fullPath);
+                foreach (var projectPath in projectPaths)
                 {
-                    continue;
+                    var alreadyLoaded = workspace.CurrentSolution.Projects
+                        .Any(p => string.Equals(p.FilePath, projectPath, StringComparison.OrdinalIgnoreCase));
+                    if (alreadyLoaded)
+                    {
+                        continue;
+                    }
+                    await workspace.OpenProjectAsync(projectPath, cancellationToken: ct);
                 }
-                await workspace.OpenProjectAsync(projectPath, cancellationToken: ct);
             }
-        }
-        else
-        {
-            logger.Information("Loading solution: {SolutionPath}", fullPath);
-            await workspace.OpenSolutionAsync(fullPath, cancellationToken: ct);
-        }
-
-        provider._initialized = true;
-        provider.RebuildDocumentCache();
-
-        foreach (var diag in workspace.Diagnostics)
-        {
-            if (diag.Kind == WorkspaceDiagnosticKind.Failure)
-                logger.Warning("Workspace load issue: {Message}", diag.Message);
-        }
-
-        var solution = workspace.CurrentSolution;
-        logger.Information("Solution loaded: {ProjectCount} projects, {DocumentCount} documents",
-            solution.ProjectIds.Count,
-            solution.Projects.Sum(p => p.DocumentIds.Count));
-
-        if (warmUp)
-        {
-            _ = Task.Run(async () =>
+            else
             {
-                try
-                {
-                    await provider.WarmUpAsync(ct);
-                }
-                catch (OperationCanceledException) { }
-                catch (Exception ex)
-                {
-                    logger.Warning(ex, "Workspace warm-up failed; tools will load on-demand");
-                }
-            }, ct);
-        }
+                logger.Information("Loading solution: {SolutionPath}", fullPath);
+                await workspace.OpenSolutionAsync(fullPath, cancellationToken: ct);
+            }
 
-        return provider;
+            provider._initialized = true;
+            provider.RebuildDocumentCache();
+
+            foreach (var diag in workspace.Diagnostics)
+            {
+                if (diag.Kind == WorkspaceDiagnosticKind.Failure)
+                    logger.Warning("Workspace load issue: {Message}", diag.Message);
+            }
+
+            var solution = workspace.CurrentSolution;
+            logger.Information("Solution loaded: {ProjectCount} projects, {DocumentCount} documents",
+                solution.ProjectIds.Count,
+                solution.Projects.Sum(p => p.DocumentIds.Count));
+
+            if (warmUp)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await provider.WarmUpAsync(ct);
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        logger.Warning(ex, "Workspace warm-up failed; tools will load on-demand");
+                    }
+                }, ct);
+            }
+
+            return provider;
+        }
+        catch
+        {
+            await provider.DisposeAsync();
+            throw;
+        }
     }
 
     public Task<Document?> GetDocumentAsync(string filePath, ProjectId? projectId = null, CancellationToken ct = default)
@@ -268,13 +282,15 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             throw new FileNotFoundException($"Solution not found: {fullPath}");
 
         await _reloadLock.WaitAsync(ct).ConfigureAwait(false);
+        MSBuildWorkspace? newWorkspace = null;
+        WorkspaceEventRegistration? newWorkspaceEvents = null;
         try
         {
             // Sampled before the load so changes arriving during it are not consumed by it.
             var structuralPending = _structuralChangePending;
             var newSolutionDir = Path.GetDirectoryName(fullPath)!;
             var solutionDirectoryChanged = !PathsEqual(_solutionDir, newSolutionDir);
-            var newWorkspace = MSBuildWorkspace.Create();
+            newWorkspace = MSBuildWorkspace.Create();
 
             _logger.Information("Switching solution to: {SolutionPath}", fullPath);
 
@@ -295,26 +311,34 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
                 await newWorkspace.OpenSolutionAsync(fullPath, cancellationToken: ct).ConfigureAwait(false);
             }
 
-            // Swap
+            var newDocumentCache = BuildDocumentCache(newWorkspace.CurrentSolution);
+            newWorkspaceEvents = newWorkspace.RegisterWorkspaceChangedHandler(OnWorkspaceChanged);
+
+            // Everything that can reject the candidate has completed. Publish one complete
+            // workspace state before any external callback runs.
             var oldWorkspace = _workspace;
-            _workspaceEvents?.Dispose();
-            var restartWatcher = solutionDirectoryChanged && _watcher != null;
-            if (restartWatcher)
-            {
-                _watcher!.Dispose();
+            var oldWorkspaceEvents = _workspaceEvents;
+            var oldWatcher = solutionDirectoryChanged ? _watcher : null;
+            if (solutionDirectoryChanged)
                 _watcher = null;
-            }
 
             _workspace = newWorkspace;
+            newWorkspace = null;
             _solutionDir = newSolutionDir;
             _solutionPath = fullPath;
-            _workspaceEvents = _workspace.RegisterWorkspaceChangedHandler(OnWorkspaceChanged);
+            _workspaceEvents = newWorkspaceEvents;
+            newWorkspaceEvents = null;
             _initialized = true;
-            RebuildDocumentCache();
+            _documentCache = newDocumentCache;
+
+            try { oldWorkspaceEvents?.Dispose(); }
+            catch (Exception ex) { _logger.Warning(ex, "Failed to detach previous workspace events"); }
+            try { oldWatcher?.Dispose(); }
+            catch (Exception ex) { _logger.Warning(ex, "Failed to dispose previous file watcher"); }
 
             if (solutionDirectoryChanged)
                 _dirtyDocuments.Clear();
-            if (restartWatcher)
+            if (_watcherRequested && _watcher == null)
                 StartFileWatcher();
 
             // Everything on disk was just read, so any structural change already seen is applied.
@@ -332,7 +356,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
                 catch (Exception ex) { _logger.Warning(ex, "Failed to dispose previous workspace"); }
             }, CancellationToken.None);
 
-            SolutionChanged?.Invoke(this, new SolutionChangedEventArgs(null, solution));
+            NotifySolutionChanged(null, solution);
 
             if (warmUp)
             {
@@ -353,6 +377,8 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         }
         finally
         {
+            newWorkspaceEvents?.Dispose();
+            newWorkspace?.Dispose();
             _reloadLock.Release();
         }
     }
@@ -366,7 +392,9 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     /// </summary>
     public void StartFileWatcher()
     {
+        _watcherRequested = true;
         if (_watcher != null) return;
+        if (string.IsNullOrEmpty(_solutionDir)) return;
 
         try
         {
@@ -395,6 +423,13 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         {
             _logger.Warning(ex, "Could not watch {SolutionDir}; tools may answer from a stale snapshot", _solutionDir);
         }
+    }
+
+    public void StopFileWatcher()
+    {
+        _watcherRequested = false;
+        _watcher?.Dispose();
+        _watcher = null;
     }
 
     /// <summary>
@@ -576,6 +611,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     private async Task LoadIfUnloadedAsync(CancellationToken ct)
     {
         if (_initialized) return;
+        if (string.IsNullOrEmpty(_solutionPath)) return;
 
         _logger.Information("Reloading workspace after idle unload: {SolutionPath}", _solutionPath);
         var sw = Stopwatch.StartNew();
@@ -626,7 +662,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             // Without this the locals still root it: under a debug JIT (and inside an async
             // state machine, where locals are fields) they stay live for the whole method.
             if (oldSolution != null)
-                SolutionChanged?.Invoke(this, new SolutionChangedEventArgs(oldSolution, null));
+                NotifySolutionChanged(oldSolution, null);
             oldWorkspace = null!;
             oldSolution = null;
 
@@ -665,6 +701,10 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     /// </summary>
     public void StartIdleMonitor(TimeSpan idleTimeout, CancellationToken ct = default)
     {
+        _idleCts?.Cancel();
+        _idleCts?.Dispose();
+        _idleCts = null;
+
         if (idleTimeout <= TimeSpan.Zero)
         {
             _logger.Information("Idle workspace unload disabled");
@@ -715,7 +755,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
     }
 
     /// <summary>Solution directory for path resolution and security checks.</summary>
-    public string SolutionDirectory => _solutionDir;
+    public string? SolutionDirectory => string.IsNullOrEmpty(_solutionDir) ? null : _solutionDir;
 
     private void OnWorkspaceChanged(WorkspaceChangeEventArgs e)
     {
@@ -746,16 +786,19 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         if (e.Kind == WorkspaceChangeKind.SolutionChanged
             || e.Kind == WorkspaceChangeKind.SolutionReloaded)
         {
-            SolutionChanged?.Invoke(this, new SolutionChangedEventArgs(e.OldSolution, e.NewSolution));
+            NotifySolutionChanged(e.OldSolution, e.NewSolution);
         }
     }
 
     private void RebuildDocumentCache()
     {
-        // Build into a new dictionary, then swap atomically to avoid
-        // concurrent GetDocumentAsync seeing a partially-cleared cache.
+        _documentCache = BuildDocumentCache(_workspace.CurrentSolution);
+    }
+
+    private static ConcurrentDictionary<string, DocumentId> BuildDocumentCache(Solution solution)
+    {
         var newCache = new ConcurrentDictionary<string, DocumentId>(StringComparer.OrdinalIgnoreCase);
-        foreach (var project in _workspace.CurrentSolution.Projects)
+        foreach (var project in solution.Projects)
         {
             foreach (var doc in project.Documents)
             {
@@ -764,7 +807,20 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             }
         }
 
-        _documentCache = newCache;
+        return newCache;
+    }
+
+    private void NotifySolutionChanged(Solution? oldSolution, Solution? newSolution)
+    {
+        var handlers = SolutionChanged;
+        if (handlers == null) return;
+
+        var args = new SolutionChangedEventArgs(oldSolution, newSolution);
+        foreach (EventHandler<SolutionChangedEventArgs> handler in handlers.GetInvocationList())
+        {
+            try { handler(this, args); }
+            catch (Exception ex) { _logger.Warning(ex, "SolutionChanged subscriber failed"); }
+        }
     }
 
     private static Document? FindDocumentByPath(IEnumerable<Document> documents, string normalizedPath)
@@ -784,6 +840,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
 
     private static bool PathsEqual(string a, string b)
     {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
         return string.Equals(
             NormalizePath(a),
             NormalizePath(b),

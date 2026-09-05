@@ -186,6 +186,7 @@ public sealed class TestWorkspaceProvider : IWorkspaceProvider
 
     public bool HasSolution => true;
     public Solution? CurrentSolution => _workspace.CurrentSolution;
+    public string? SolutionPath => _workspace.CurrentSolution.FilePath;
     public string SolutionDirectory => Path.GetTempPath();
 
 #pragma warning disable CS0067

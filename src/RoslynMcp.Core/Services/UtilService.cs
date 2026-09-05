@@ -99,7 +99,16 @@ public class UtilService
     {
         var solution = _workspace.CurrentSolution;
         if (solution is null)
-            return Result<WorkspaceStatusResponse>.Fail("No solution loaded");
+        {
+            return new WorkspaceStatusResponse(
+                _workspace.SolutionPath,
+                ProjectCount: 0,
+                DocumentCount: 0,
+                ErrorCount: 0,
+                WarningCount: 0,
+                IsSolutionSelected: _workspace.SolutionPath != null,
+                IsFullyLoaded: false);
+        }
         int projectCount = 0;
         int documentCount = 0;
         int errorCount = 0;
@@ -128,6 +137,7 @@ public class UtilService
             documentCount,
             errorCount,
             warningCount,
+            IsSolutionSelected: true,
             IsFullyLoaded: true);
     }
 
@@ -342,8 +352,8 @@ public class UtilService
         ConfigSetRequest request, CancellationToken ct = default)
     {
         var response = _config.Set(request.Key, request.Value, out var error);
-        if (error != null)
-            return Task.FromResult(Result<ConfigSetResponse>.Fail(error));
+        if (response is null)
+            return Task.FromResult(Result<ConfigSetResponse>.Fail(error ?? "Configuration update failed"));
 
         return Task.FromResult(Result<ConfigSetResponse>.Ok(response));
     }

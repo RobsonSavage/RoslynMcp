@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [string]$BootstrapSolutionPath = (Join-Path $PSScriptRoot "RoslynMcp.sln"),
     [string]$UserProfilePath = $env:USERPROFILE,
     [switch]$SkipUserEnvironment
 )
@@ -8,8 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$bootstrapVariable = "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"
-$bootstrapReference = '$' + '{ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}'
+$obsoleteBootstrapVariable = "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"
 
 function Get-TextState {
     param([Parameter(Mandatory)][string]$Path)
@@ -121,9 +119,6 @@ function New-ClaudeRoslynEntry {
         type = "stdio"
         command = "cmd"
         args = @("/c", '%LOCALAPPDATA%\RoslynMcp\RoslynMcp.Server.exe')
-        env = [pscustomobject][ordered]@{
-            ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH = $bootstrapReference
-        }
         timeout = 120000
     }
 }
@@ -188,20 +183,17 @@ function Update-ClaudeConfig {
     else {
         $roslyn = $roslynProperty.Value
         $envProperty = $roslyn.PSObject.Properties["env"]
-        if ($null -eq $envProperty) {
-            $roslyn | Add-Member -NotePropertyName "env" -NotePropertyValue ([pscustomobject][ordered]@{
-                ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH = $bootstrapReference
-            })
-        }
-        else {
+        if ($null -ne $envProperty -and $null -ne $envProperty.Value) {
             $environment = $envProperty.Value
-            $bootstrapProperty = $environment.PSObject.Properties[$bootstrapVariable]
-            if ($null -eq $bootstrapProperty) {
-                $environment | Add-Member -NotePropertyName $bootstrapVariable -NotePropertyValue $bootstrapReference
+            if ($null -ne $environment.PSObject.Properties[$obsoleteBootstrapVariable]) {
+                $environment.PSObject.Properties.Remove($obsoleteBootstrapVariable)
             }
-            else {
-                $bootstrapProperty.Value = $bootstrapReference
+            if (@($environment.PSObject.Properties).Count -eq 0) {
+                $roslyn.PSObject.Properties.Remove("env")
             }
+        }
+        elseif ($null -ne $envProperty) {
+            $roslyn.PSObject.Properties.Remove("env")
         }
     }
 
@@ -215,7 +207,7 @@ function Update-ClaudeConfig {
     }
 
     Write-TextAtomic -Path $Path -Text $content -ExpectedState $state
-    Write-Host "INFO: Configured Claude Code to forward $bootstrapVariable"
+    Write-Host "INFO: Removed obsolete Claude Code bootstrap environment forwarding"
 }
 
 function New-CodexRoslynSection {
@@ -225,7 +217,6 @@ function New-CodexRoslynSection {
         '[mcp_servers.roslyn]'
         'command = "cmd"'
         'args = ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"]'
-        ('env_vars = ["{0}"]' -f $bootstrapVariable)
         'tool_timeout_sec = 60'
         'startup_timeout_sec = 120'
         ''
@@ -269,55 +260,54 @@ function Update-CodexConfig {
     if ($envMatches.Count -eq 1) {
         $envMatch = $envMatches[0]
         $items = $envMatch.Groups["items"].Value
-        if ($items.Contains('"' + $bootstrapVariable + '"') -or $items.Contains("'" + $bootstrapVariable + "'")) {
+        if (-not ($items.Contains('"' + $obsoleteBootstrapVariable + '"') -or
+            $items.Contains("'" + $obsoleteBootstrapVariable + "'"))) {
             Write-Host "DEBUG: Codex MCP configuration is already current"
             return
         }
-        $items = $items.Trim()
-        $updatedItems = if ($items) { $items + ', "' + $bootstrapVariable + '"' } else { '"' + $bootstrapVariable + '"' }
-        $updatedEnv = $envMatch.Groups["indent"].Value + "env_vars = [$updatedItems]"
-        $updatedSection = $section.Substring(0, $envMatch.Index) + $updatedEnv + $section.Substring($envMatch.Index + $envMatch.Length)
+
+        $valueMatches = [regex]::Matches($items, '(?<quote>["''])(?<value>[^"'']+)\k<quote>')
+        if ($valueMatches.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($items)) {
+            throw "Codex roslyn MCP env_vars contains an unsupported value: $Path"
+        }
+        $remaining = @($valueMatches | ForEach-Object { $_.Groups["value"].Value } |
+            Where-Object { $_ -ne $obsoleteBootstrapVariable })
+        if ($remaining.Count -eq 0) {
+            $removeLength = $envMatch.Length
+            if ($envMatch.Index + $removeLength -lt $section.Length -and
+                $section.Substring($envMatch.Index + $removeLength).StartsWith($state.Newline)) {
+                $removeLength += $state.Newline.Length
+            }
+            $updatedSection = $section.Remove($envMatch.Index, $removeLength)
+        }
+        else {
+            $updatedItems = ($remaining | ForEach-Object { '"' + $_ + '"' }) -join ', '
+            $updatedEnv = $envMatch.Groups["indent"].Value + "env_vars = [$updatedItems]"
+            $updatedSection = $section.Substring(0, $envMatch.Index) + $updatedEnv + $section.Substring($envMatch.Index + $envMatch.Length)
+        }
     }
     else {
         if ($section -match '(?m)^[ \t]*env_vars[ \t]*=') {
             throw "Codex roslyn MCP env_vars must be a single-line array: $Path"
         }
-        $headerEnd = $section.IndexOf($state.Newline)
-        if ($headerEnd -lt 0) {
-            $updatedSection = $section + $state.Newline + ('env_vars = ["{0}"]' -f $bootstrapVariable) + $state.Newline
-        }
-        else {
-            $insertAt = $headerEnd + $state.Newline.Length
-            $updatedSection = $section.Insert($insertAt, ('env_vars = ["{0}"]{1}' -f $bootstrapVariable, $state.Newline))
-        }
+        Write-Host "DEBUG: Codex MCP configuration is already current"
+        return
     }
 
     $content = $state.Text.Substring(0, $sectionMatch.Index) + $updatedSection + $state.Text.Substring($sectionMatch.Index + $sectionMatch.Length)
     Write-TextAtomic -Path $Path -Text $content -ExpectedState $state
-    Write-Host "INFO: Configured Codex to forward $bootstrapVariable"
+    Write-Host "INFO: Removed obsolete Codex bootstrap environment forwarding"
 }
 
-$defaultBootstrap = [IO.Path]::GetFullPath($BootstrapSolutionPath)
-if (-not (Test-Path -LiteralPath $defaultBootstrap -PathType Leaf)) {
-    throw "Bootstrap solution does not exist: $defaultBootstrap"
-}
 if ([string]::IsNullOrWhiteSpace($UserProfilePath)) {
     throw "A user profile path is required."
 }
 
 if (-not $SkipUserEnvironment) {
-    $existingBootstrap = [Environment]::GetEnvironmentVariable($bootstrapVariable, "User")
-    if (-not [string]::IsNullOrWhiteSpace($existingBootstrap) -and
-        (Test-Path -LiteralPath $existingBootstrap -PathType Leaf)) {
-        $effectiveBootstrap = [IO.Path]::GetFullPath($existingBootstrap)
-        Write-Host "DEBUG: Preserving existing $bootstrapVariable=$effectiveBootstrap"
-    }
-    else {
-        $effectiveBootstrap = $defaultBootstrap
-        [Environment]::SetEnvironmentVariable($bootstrapVariable, $effectiveBootstrap, "User")
-        Write-Host "INFO: Set user environment variable $bootstrapVariable=$effectiveBootstrap"
-    }
-    [Environment]::SetEnvironmentVariable($bootstrapVariable, $effectiveBootstrap, "Process")
+    $nullString = [System.Management.Automation.Language.NullString]::Value
+    [Environment]::SetEnvironmentVariable($obsoleteBootstrapVariable, $nullString, "User")
+    [Environment]::SetEnvironmentVariable($obsoleteBootstrapVariable, $nullString, "Process")
+    Write-Host "INFO: Removed obsolete user environment variable $obsoleteBootstrapVariable"
 }
 
 Update-ClaudeConfig -Path (Join-Path $UserProfilePath ".claude.json")

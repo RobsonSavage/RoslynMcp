@@ -20,6 +20,7 @@ public interface IWorkspaceProvider
 {
     bool HasSolution { get; }
     Solution? CurrentSolution { get; }
+    string? SolutionPath { get; }
     Task<Document?> GetDocumentAsync(string filePath, ProjectId? projectId = null, CancellationToken ct = default);
     Task<IReadOnlyList<Document>> GetDocumentsAsync(string filePath, CancellationToken ct = default);
     Task<Project?> GetProjectAsync(string projectName, CancellationToken ct = default);
@@ -32,7 +33,7 @@ public interface IWorkspaceProvider
     Task<bool> TryReloadDocumentAsync(string filePath, CancellationToken ct = default);
 
     /// <summary>Solution directory for path resolution and security checks.</summary>
-    string SolutionDirectory { get; }
+    string? SolutionDirectory { get; }
 
     /// <summary>
     /// Reload the workspace with a different solution file. Disposes the old workspace.

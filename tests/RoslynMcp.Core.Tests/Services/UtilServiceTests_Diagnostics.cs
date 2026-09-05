@@ -146,6 +146,7 @@ namespace ProjectB { public class ClassC { } }";
         var response = result.Value!;
         Assert.Equal(2, response.ProjectCount);
         Assert.Equal(3, response.DocumentCount);
+        Assert.True(response.IsSolutionSelected);
         Assert.True(response.IsFullyLoaded);
     }
 

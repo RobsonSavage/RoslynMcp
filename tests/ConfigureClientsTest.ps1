@@ -15,12 +15,10 @@ function Assert-True {
 function Invoke-ConfigScript {
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
-        [Parameter(Mandatory)][string]$ProfilePath,
-        [Parameter(Mandatory)][string]$SolutionPath
+        [Parameter(Mandatory)][string]$ProfilePath
     )
 
     $parameters = @{
-        BootstrapSolutionPath = $SolutionPath
         UserProfilePath = $ProfilePath
         SkipUserEnvironment = $true
     }
@@ -29,7 +27,6 @@ function Invoke-ConfigScript {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot "configure-clients.ps1"
-$solutionPath = Join-Path $repoRoot "RoslynMcp.sln"
 $artifactsRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot "artifacts"))
 $testRoot = Join-Path $artifactsRoot "configure-clients-$([guid]::NewGuid().ToString('N'))"
 $profilePath = Join-Path $testRoot "existing"
@@ -57,6 +54,10 @@ try {
         "/c",
         "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"
       ],
+      "env": {
+        "EXISTING_VAR": "keep",
+        "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH": "${ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}"
+      },
       "timeout": 120000
     }
   },
@@ -76,7 +77,7 @@ model = "test"
 [mcp_servers.roslyn]
 command = "cmd"
 args = ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"]
-env_vars = ["EXISTING_VAR"]
+env_vars = ["EXISTING_VAR", "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"]
 tool_timeout_sec = 60
 startup_timeout_sec = 120
 
@@ -88,37 +89,34 @@ command = "other-server"
         $codexFixture,
         [Text.UTF8Encoding]::new($false))
 
-    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $profilePath -SolutionPath $solutionPath
+    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $profilePath
 
     $claudePath = Join-Path $profilePath ".claude.json"
     $claude = Get-Content -Raw -LiteralPath $claudePath | ConvertFrom-Json
     Assert-True ($claude.theme -eq "dark") "Claude root settings are preserved"
     Assert-True ($claude.mcpServers.other.command -eq "other-server") "Other Claude MCP servers are preserved"
-    $expectedReference = '$' + '{ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}'
+    Assert-True ($claude.mcpServers.roslyn.env.EXISTING_VAR -eq "keep") "Other Claude MCP environment values are preserved"
     Assert-True (
-        $claude.mcpServers.roslyn.env.ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH -eq $expectedReference
-    ) "Claude forwards the bootstrap environment variable"
+        $null -eq $claude.mcpServers.roslyn.env.PSObject.Properties["ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"]
+    ) "Claude bootstrap environment forwarding is removed"
 
     $codexPath = Join-Path $profilePath ".codex\config.toml"
     $codexText = [IO.File]::ReadAllText($codexPath)
     Assert-True ($codexText.Contains('"EXISTING_VAR"')) "Existing Codex env_vars are preserved"
-    Assert-True ($codexText.Contains('"ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"')) "Codex bootstrap whitelist is added"
     Assert-True (
-        [regex]::Matches($codexText, '"ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"').Count -eq 1
-    ) "Codex bootstrap whitelist is unique"
+        -not $codexText.Contains('"ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"')
+    ) "Codex bootstrap whitelist is removed"
 
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if ($null -ne $codex) {
         $env:CODEX_HOME = Join-Path $profilePath ".codex"
         $effective = & $codex.Source mcp get roslyn --json | ConvertFrom-Json
-        Assert-True (
-            $effective.transport.env_vars -contains "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"
-        ) "Codex parses the generated whitelist"
+        Assert-True ($effective.transport.env_vars -contains "EXISTING_VAR") "Codex parses the preserved whitelist"
     }
 
     $claudeHash = (Get-FileHash -LiteralPath $claudePath -Algorithm SHA256).Hash
     $codexHash = (Get-FileHash -LiteralPath $codexPath -Algorithm SHA256).Hash
-    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $profilePath -SolutionPath $solutionPath
+    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $profilePath
     Assert-True (
         (Get-FileHash -LiteralPath $claudePath -Algorithm SHA256).Hash -eq $claudeHash
     ) "Claude configuration is idempotent"
@@ -126,11 +124,13 @@ command = "other-server"
         (Get-FileHash -LiteralPath $codexPath -Algorithm SHA256).Hash -eq $codexHash
     ) "Codex configuration is idempotent"
 
-    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $newProfilePath -SolutionPath $solutionPath
+    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $newProfilePath
     $newClaude = Get-Content -Raw -LiteralPath (Join-Path $newProfilePath ".claude.json") | ConvertFrom-Json
     Assert-True ($newClaude.mcpServers.roslyn.command -eq "cmd") "Missing Claude configuration is created"
+    Assert-True ($null -eq $newClaude.mcpServers.roslyn.PSObject.Properties["env"]) "New Claude entry has no bootstrap environment"
     $newCodex = [IO.File]::ReadAllText((Join-Path $newProfilePath ".codex\config.toml"))
     Assert-True ($newCodex.Contains("[mcp_servers.roslyn]")) "Missing Codex configuration is created"
+    Assert-True (-not $newCodex.Contains("env_vars")) "New Codex entry has no bootstrap whitelist"
 
     [void](New-Item -ItemType Directory -Path (Join-Path $plainProfilePath ".codex") -Force)
     [IO.File]::WriteAllText(
@@ -141,7 +141,7 @@ command = "other-server"
         (Join-Path $plainProfilePath ".codex\config.toml"),
         'model = "test"',
         [Text.UTF8Encoding]::new($false))
-    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $plainProfilePath -SolutionPath $solutionPath
+    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $plainProfilePath
     $plainClaude = Get-Content -Raw -LiteralPath (Join-Path $plainProfilePath ".claude.json") | ConvertFrom-Json
     Assert-True ($plainClaude.theme -eq "light") "Claude settings survive adding mcpServers"
     Assert-True ($plainClaude.mcpServers.roslyn.command -eq "cmd") "Claude mcpServers is added"
@@ -157,7 +157,10 @@ command = "other-server"
   "mcpServers": {
     "roslyn": {
       "type": "stdio",
-      "command": "cmd"
+      "command": "cmd",
+      "env": {
+        "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH": "${ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}"
+      }
     }
   }
 }
@@ -168,13 +171,13 @@ command = "other-server"
         (Join-Path $duplicateKeyProfilePath ".codex\config.toml"),
         'model = "test"',
         [Text.UTF8Encoding]::new($false))
-    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $duplicateKeyProfilePath -SolutionPath $solutionPath
+    Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $duplicateKeyProfilePath
     $duplicateResult = [IO.File]::ReadAllText($duplicateClaudePath)
     Assert-True ($duplicateResult.Contains('"projects"')) "Lower-case Claude root key is preserved"
     Assert-True ($duplicateResult.Contains('"Projects"')) "Case-distinct Claude root key is preserved"
     Assert-True (
-        $duplicateResult.Contains('"ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"')
-    ) "Claude MCP block is updated without parsing unrelated root keys"
+        -not $duplicateResult.Contains('"ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"')
+    ) "Claude MCP block is cleaned without parsing unrelated root keys"
 
     [void](New-Item -ItemType Directory -Path (Join-Path $invalidProfilePath ".codex") -Force)
     $invalidClaudePath = Join-Path $invalidProfilePath ".claude.json"
@@ -183,7 +186,7 @@ command = "other-server"
     [IO.File]::WriteAllText($invalidCodexPath, 'model = "untouched"', [Text.UTF8Encoding]::new($false))
     $failed = $false
     try {
-        Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $invalidProfilePath -SolutionPath $solutionPath
+        Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $invalidProfilePath
     }
     catch {
         $failed = $true

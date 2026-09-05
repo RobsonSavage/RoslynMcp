@@ -30,11 +30,12 @@ public record ReloadFileResponse(
 public record GetWorkspaceStatusRequest();
 
 public record WorkspaceStatusResponse(
-    string SolutionPath,
+    string? SolutionPath,
     int ProjectCount,
     int DocumentCount,
     int ErrorCount,
     int WarningCount,
+    bool IsSolutionSelected,
     bool IsFullyLoaded,
     IReadOnlyDictionary<string, object>? Metrics = null);
 
@@ -133,9 +134,7 @@ public record SetSolutionRootResponse(
     int ProjectCount,
     int DocumentCount,
     bool Changed,
-    bool FollowEnabled,
-    string? PreviousSolutionPath = null,
-    string? Message = null);
+    string? PreviousSolutionPath = null);
 
 // ── config_get ──
 

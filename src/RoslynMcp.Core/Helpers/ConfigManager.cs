@@ -14,7 +14,7 @@ public enum ImportResult { Success, NoOp, FallbackToDefaults, Error }
 /// </summary>
 public class ConfigManager
 {
-    private string _configPath;
+    private string? _configPath;
     private readonly object _lock = new();
     private readonly ILogger? _logger;
     private Dictionary<string, string> _values;
@@ -33,35 +33,39 @@ public class ConfigManager
         new("graph.auto_rebuild", "bool", "true", "Rebuild the dependency graph after every solution load"),
         new("workspace.idle_unload_minutes", "int", "30", "Unload the workspace after N minutes idle (0 = never)"),
         new("workspace.watch_files", "bool", "true", "Refresh the workspace from disk when source files change"),
-        new("workspace.follow_roots", "bool", "true", "Allow client hooks to follow workspace roots"),
     };
 
     private static readonly Dictionary<string, ConfigDefinition> s_definitionMap =
         s_definitions.ToDictionary(d => d.Key, StringComparer.OrdinalIgnoreCase);
+    private static readonly string[] s_retiredKeys = ["workspace.follow_roots"];
 
     private const string ToolPrefix = "tools.";
     private const string TimeoutPrefix = "timeout.";
 
-    public ConfigManager(string configDir, ILogger? logger = null)
+    public ConfigManager(string? configDir, ILogger? logger = null)
     {
-        _configPath = Path.Combine(configDir, "config.json");
+        _configPath = configDir == null ? null : Path.Combine(configDir, "config.json");
         _logger = logger;
-        _values = Load(_configPath);
+        _values = _configPath == null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : Load(_configPath);
     }
 
-    public string ConfigDirectory
+    public string? ConfigDirectory
     {
         get
         {
             lock (_lock)
-                return Path.GetDirectoryName(_configPath)!;
+                return _configPath == null ? null : Path.GetDirectoryName(_configPath);
         }
     }
 
-    public void SwitchDirectory(string configDir)
+    public void SwitchDirectory(string? configDir)
     {
-        var configPath = Path.Combine(configDir, "config.json");
-        var values = Load(configPath);
+        var configPath = configDir == null ? null : Path.Combine(configDir, "config.json");
+        var values = configPath == null
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : Load(configPath);
 
         lock (_lock)
         {
@@ -95,6 +99,12 @@ public class ConfigManager
     {
         lock (_lock)
         {
+            if (_configPath == null)
+            {
+                error = "NO_SOLUTION_SELECTED: Select a solution before changing configuration.";
+                return null;
+            }
+
             bool isKnown = s_definitionMap.ContainsKey(key);
             bool isDynamic = key.StartsWith(ToolPrefix, StringComparison.OrdinalIgnoreCase)
                 || (key.StartsWith(TimeoutPrefix, StringComparison.OrdinalIgnoreCase) && key != "timeout.default");
@@ -165,6 +175,10 @@ public class ConfigManager
 
             if (enabled.HasValue)
             {
+                if (_configPath == null)
+                    throw new InvalidOperationException(
+                        "NO_SOLUTION_SELECTED: Select a solution before changing configuration.");
+
                 var newValue = enabled.Value ? "true" : "false";
                 var wasChanged = currentEnabled != enabled.Value;
                 _values[key] = newValue;
@@ -178,6 +192,12 @@ public class ConfigManager
 
     public ImportResult ImportFromV1(string sourcePath, bool force, ILogger logger)
     {
+        if (_configPath == null)
+        {
+            logger.Error("Cannot import configuration before a solution is selected");
+            return ImportResult.Error;
+        }
+
         Dictionary<string, string> sourceData;
         try
         {
@@ -281,7 +301,24 @@ public class ConfigManager
         try
         {
             var json = File.ReadAllText(configPath, Encoding.UTF8);
-            return ParseSimpleJson(json);
+            var values = ParseSimpleJson(json);
+            var removedRetiredKey = false;
+            foreach (var key in s_retiredKeys)
+                removedRetiredKey |= values.Remove(key);
+
+            if (removedRetiredKey)
+            {
+                try
+                {
+                    SaveConfig(configPath, values);
+                    _logger?.Information("Removed retired configuration keys from {Path}", configPath);
+                }
+                catch (Exception ex)
+                {
+                    _logger?.Warning(ex, "Could not remove retired configuration keys from {Path}", configPath);
+                }
+            }
+            return values;
         }
         catch (IOException ex)
         {
@@ -302,26 +339,34 @@ public class ConfigManager
 
     private void Save()
     {
-        var dir = Path.GetDirectoryName(_configPath);
+        var configPath = _configPath
+            ?? throw new InvalidOperationException(
+                "NO_SOLUTION_SELECTED: Select a solution before changing configuration.");
+        SaveConfig(configPath, _values);
+    }
+
+    private static void SaveConfig(string configPath, Dictionary<string, string> values)
+    {
+        var dir = Path.GetDirectoryName(configPath);
         if (dir != null && !Directory.Exists(dir))
             Directory.CreateDirectory(dir);
 
-        var tempPath = _configPath + ".tmp";
+        var tempPath = configPath + ".tmp";
         var options = new JsonSerializerOptions { WriteIndented = true };
-        var json = JsonSerializer.Serialize(_values, options);
+        var json = JsonSerializer.Serialize(values, options);
         File.WriteAllText(tempPath, json, Encoding.UTF8);
 
         try
         {
-            if (File.Exists(_configPath))
-                File.Replace(tempPath, _configPath, _configPath + ".bak");
+            if (File.Exists(configPath))
+                File.Replace(tempPath, configPath, configPath + ".bak");
             else
-                File.Move(tempPath, _configPath);
+                File.Move(tempPath, configPath);
         }
         catch (IOException)
         {
             // Fallback: direct write if Replace fails (e.g., cross-volume)
-            File.Copy(tempPath, _configPath, overwrite: true);
+            File.Copy(tempPath, configPath, overwrite: true);
             try { File.Delete(tempPath); } catch { }
         }
     }

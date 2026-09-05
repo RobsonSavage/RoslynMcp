@@ -338,6 +338,17 @@ public class StdioIntegrationTest : IClassFixture<ServerFixture>
         Assert.Contains("kb_search", toolNames);
         Assert.Contains("apollo_diagnose", toolNames);
         Assert.Contains("preview_rename", toolNames);
+
+        var rootSelector = tools.EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "set_solution_root");
+        var selectorProperties = rootSelector.GetProperty("inputSchema").GetProperty("properties");
+        Assert.True(selectorProperties.TryGetProperty("rootPath", out _));
+        Assert.True(selectorProperties.TryGetProperty("warmUp", out _));
+        Assert.False(selectorProperties.TryGetProperty("hookOutput", out _));
+        Assert.DoesNotContain(
+            "follow",
+            rootSelector.GetProperty("description").GetString(),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -493,61 +504,4 @@ public class StdioIntegrationTest : IClassFixture<ServerFixture>
         Assert.False(stats.Value.TryGetProperty("isError", out var isError) && isError.GetBoolean());
     }
 
-    [Fact]
-    public async Task SetSolutionRoot_DoesNotOverrideAnExplicitStartupPin()
-    {
-        EnsureReady();
-        Assert.NotNull(_server.SolutionPath);
-
-        var rootPath = Path.GetDirectoryName(_server.SolutionPath)!;
-        var result = await _server.SendRequestAsync("tools/call", new
-        {
-            name = "set_solution_root",
-            arguments = new { rootPath, warmUp = false }
-        });
-
-        Assert.NotNull(result);
-        Assert.True(result.Value.TryGetProperty("content", out var content), result.Value.ToString());
-        var text = content[0].GetProperty("text").GetString()!;
-        using var parsed = JsonDocument.Parse(text);
-        Assert.False(parsed.RootElement.GetProperty("changed").GetBoolean());
-        Assert.False(parsed.RootElement.GetProperty("followEnabled").GetBoolean());
-        Assert.Equal(Path.GetFullPath(_server.SolutionPath), parsed.RootElement.GetProperty("solutionPath").GetString());
-        Assert.Contains("disabled", parsed.RootElement.GetProperty("message").GetString());
-    }
-
-    [Fact]
-    public async Task SetSolutionRoot_ReturnsValidNoOpJsonForPreToolUseHook()
-    {
-        EnsureReady();
-        Assert.NotNull(_server.SolutionPath);
-
-        var rootPath = Path.GetDirectoryName(_server.SolutionPath)!;
-        var result = await _server.SendRequestAsync("tools/call", new
-        {
-            name = "set_solution_root",
-            arguments = new { rootPath, warmUp = false, hookOutput = true }
-        });
-
-        Assert.NotNull(result);
-        Assert.True(result.Value.TryGetProperty("content", out var content), result.Value.ToString());
-        Assert.Equal("{}", content[0].GetProperty("text").GetString());
-    }
-
-    [Fact]
-    public void WorkspaceFollowPlugin_RequestsPreToolUseHookOutput()
-    {
-        Assert.NotNull(_server.SolutionPath);
-
-        var solutionDir = Path.GetDirectoryName(_server.SolutionPath)!;
-        var hooksPath = Path.Combine(solutionDir, "plugins", "roslyn-workspace-follow", "hooks", "hooks.json");
-        using var hooks = JsonDocument.Parse(File.ReadAllText(hooksPath));
-        var input = hooks.RootElement
-            .GetProperty("hooks")
-            .GetProperty("PreToolUse")[0]
-            .GetProperty("hooks")[0]
-            .GetProperty("input");
-
-        Assert.True(input.GetProperty("hookOutput").GetBoolean());
-    }
 }

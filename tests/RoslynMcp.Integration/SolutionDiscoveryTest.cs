@@ -35,8 +35,8 @@ public sealed class SolutionDiscoveryTest
             }
         };
 
-        // A stale User-scope variable would otherwise decide this for us.
-        server.StartInfo.EnvironmentVariables.Remove("ROSLYNMCP_SOLUTION_PATH");
+        // An empty inherited variable must not suppress working-directory discovery.
+        server.StartInfo.EnvironmentVariables["ROSLYNMCP_SOLUTION_PATH"] = string.Empty;
 
         server.Start();
 
@@ -44,6 +44,7 @@ public sealed class SolutionDiscoveryTest
         var stderr = server.StandardError.ReadToEndAsync();
 
         string? response = null;
+        string? statusResponse = null;
         try
         {
             await server.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new
@@ -61,6 +62,34 @@ public sealed class SolutionDiscoveryTest
 
             using var timeout = new CancellationTokenSource(120_000);
             response = await server.StandardOutput.ReadLineAsync(timeout.Token);
+
+            if (!string.IsNullOrWhiteSpace(response))
+            {
+                await server.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    method = "notifications/initialized"
+                }));
+                await server.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = 2,
+                    method = "tools/call",
+                    @params = new { name = "get_workspace_status", arguments = new { } }
+                }));
+
+                while (true)
+                {
+                    var line = await server.StandardOutput.ReadLineAsync(timeout.Token);
+                    Assert.False(string.IsNullOrWhiteSpace(line));
+                    using var candidate = JsonDocument.Parse(line);
+                    if (candidate.RootElement.TryGetProperty("id", out var id) && id.GetInt32() == 2)
+                    {
+                        statusResponse = line;
+                        break;
+                    }
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -84,6 +113,19 @@ public sealed class SolutionDiscoveryTest
         Assert.True(
             document.RootElement.TryGetProperty("result", out _),
             $"Initialize returned an error. Response: {response}, stderr: {diagnostics}");
+
+        Assert.False(string.IsNullOrWhiteSpace(statusResponse));
+        using var statusDocument = JsonDocument.Parse(statusResponse);
+        var statusText = statusDocument.RootElement
+            .GetProperty("result")
+            .GetProperty("content")[0]
+            .GetProperty("text")
+            .GetString();
+        using var statusBody = JsonDocument.Parse(statusText!);
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(solutionDir, "RoslynMcp.sln")),
+            statusBody.RootElement.GetProperty("solutionPath").GetString());
+        Assert.True(statusBody.RootElement.GetProperty("isSolutionSelected").GetBoolean());
     }
 
     private static string FindSolutionDir()

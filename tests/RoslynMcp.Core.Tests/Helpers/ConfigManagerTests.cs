@@ -213,4 +213,37 @@ public class ConfigManagerTests : IDisposable
         // Also accessible via Get
         Assert.Equal("2.0", cm.Get("version").Value);
     }
+
+    [Fact]
+    public void WorkspaceFollowSettingIsNoLongerAvailable()
+    {
+        var configDir = CreateConfigDir();
+        var configPath = Path.Combine(configDir, "config.json");
+        File.WriteAllText(
+            configPath,
+            """
+            {
+              "workspace.follow_roots": "false",
+              "timeout.default": "45"
+            }
+            """);
+        var cm = new ConfigManager(configDir, _logger);
+
+        Assert.DoesNotContain(cm.List().Entries, entry => entry.Key == "workspace.follow_roots");
+        Assert.Null(cm.Set("workspace.follow_roots", "true", out var error));
+        Assert.Contains("Unknown configuration key", error);
+        Assert.Equal("45", cm.Get("timeout.default").Value);
+        Assert.DoesNotContain("workspace.follow_roots", File.ReadAllText(configPath));
+    }
+
+    [Fact]
+    public void UnselectedConfigurationUsesDefaultsWithoutPersisting()
+    {
+        var cm = new ConfigManager(configDir: null);
+
+        Assert.Null(cm.ConfigDirectory);
+        Assert.Equal("30", cm.Get("timeout.default").DefaultValue);
+        Assert.Null(cm.Set("timeout.default", "60", out var error));
+        Assert.Contains("NO_SOLUTION_SELECTED", error);
+    }
 }

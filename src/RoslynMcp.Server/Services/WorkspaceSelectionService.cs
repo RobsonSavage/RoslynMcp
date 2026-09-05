@@ -1,4 +1,3 @@
-using RoslynMcp.Core.Helpers;
 using RoslynMcp.Core.Services;
 using RoslynMcp.Shared;
 using RoslynMcp.Shared.Contracts.Util;
@@ -10,27 +9,17 @@ internal sealed class WorkspaceSelectionService : IWorkspaceSelectionService, ID
 {
     private readonly IWorkspaceProvider _workspace;
     private readonly ISolutionContextSwitcher _switcher;
-    private readonly ConfigManager _config;
     private readonly ILogger _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private bool _sessionFollowEnabled;
-    private string? _disabledReason;
 
     public WorkspaceSelectionService(
         IWorkspaceProvider workspace,
         ISolutionContextSwitcher switcher,
-        ConfigManager config,
-        bool hasExplicitStartupPin,
         ILogger logger)
     {
         _workspace = workspace;
         _switcher = switcher;
-        _config = config;
         _logger = logger;
-        _sessionFollowEnabled = !hasExplicitStartupPin;
-        _disabledReason = hasExplicitStartupPin
-            ? "Root following is disabled because the server started with an explicit solution path"
-            : null;
     }
 
     public async Task<Result<SetSolutionPathResponse>> SetSolutionPathAsync(
@@ -45,9 +34,6 @@ internal sealed class WorkspaceSelectionService : IWorkspaceSelectionService, ID
         try
         {
             var response = await _switcher.SwitchAsync(validation.Value!, request.WarmUp, ct).ConfigureAwait(false);
-            _sessionFollowEnabled = false;
-            _disabledReason = "Root following is disabled after a manual set_solution_path call";
-            _logger.Information("Workspace root following disabled after manual solution selection");
             return Result<SetSolutionPathResponse>.Ok(response);
         }
         finally
@@ -80,15 +66,6 @@ internal sealed class WorkspaceSelectionService : IWorkspaceSelectionService, ID
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (!_sessionFollowEnabled)
-                return CurrentResponse(fullRootPath, followEnabled: false, _disabledReason);
-
-            if (!ReadFollowConfig())
-                return CurrentResponse(
-                    fullRootPath,
-                    followEnabled: false,
-                    "Root following is disabled by workspace.follow_roots");
-
             string? solutionPath;
             try
             {
@@ -105,38 +82,24 @@ internal sealed class WorkspaceSelectionService : IWorkspaceSelectionService, ID
                     $"Could not discover a solution from workspace root: {fullRootPath}");
             }
 
-            // A root that holds no solution is the ordinary case for a Python repository or
-            // a notes tree, not a fault: the server goes on serving whatever it already had,
-            // which is what the bootstrap solution exists for. Report that path rather than
-            // an error, so a client asking where it is pointed gets an answer. With nothing
-            // loaded there is no true path to report, and it stays a failure.
             if (solutionPath == null)
-                return _workspace.CurrentSolution is null
-                    ? Result<SetSolutionRootResponse>.Fail(
-                        $"No .sln or .slnx found in the git repository containing: {fullRootPath}")
-                    : CurrentResponse(
-                        fullRootPath,
-                        followEnabled: true,
-                        $"No .sln or .slnx found in the git repository containing: {fullRootPath}. " +
-                        "Keeping the solution the workspace already has.");
+                return Result<SetSolutionRootResponse>.Fail(
+                    $"No .sln or .slnx found in the git repository containing: {fullRootPath}");
 
-            var currentPath = _workspace.CurrentSolution?.FilePath;
+            var currentPath = _workspace.SolutionPath;
             if (PathsEqual(currentPath, solutionPath))
-                return CurrentResponse(fullRootPath, followEnabled: true, "Workspace already uses the discovered solution");
+                return CurrentResponse(fullRootPath);
 
             try
             {
                 var switched = await _switcher.SwitchAsync(solutionPath, request.WarmUp, ct).ConfigureAwait(false);
-                var stillEnabled = ReadFollowConfig();
                 return Result<SetSolutionRootResponse>.Ok(new SetSolutionRootResponse(
                     fullRootPath,
                     switched.SolutionPath,
                     switched.ProjectCount,
                     switched.DocumentCount,
                     Changed: true,
-                    FollowEnabled: stillEnabled,
-                    switched.PreviousSolutionPath,
-                    stillEnabled ? null : "Root following is disabled by the target solution configuration"));
+                    switched.PreviousSolutionPath));
             }
             catch (OperationCanceledException)
             {
@@ -157,29 +120,16 @@ internal sealed class WorkspaceSelectionService : IWorkspaceSelectionService, ID
 
     public void Dispose() => _gate.Dispose();
 
-    private Result<SetSolutionRootResponse> CurrentResponse(
-        string rootPath,
-        bool followEnabled,
-        string? message)
+    private Result<SetSolutionRootResponse> CurrentResponse(string rootPath)
     {
         var solution = _workspace.CurrentSolution;
-        var solutionPath = solution?.FilePath ?? string.Empty;
+        var solutionPath = _workspace.SolutionPath ?? string.Empty;
         return Result<SetSolutionRootResponse>.Ok(new SetSolutionRootResponse(
             rootPath,
             solutionPath,
             solution?.ProjectIds.Count ?? 0,
             solution?.Projects.Sum(project => project.DocumentIds.Count) ?? 0,
-            Changed: false,
-            FollowEnabled: followEnabled,
-            Message: message));
-    }
-
-    private bool ReadFollowConfig()
-    {
-        var entry = _config.Get("workspace.follow_roots");
-        return bool.TryParse(entry.Value, out var configured)
-            ? configured
-            : !bool.TryParse(entry.DefaultValue, out var defaultValue) || defaultValue;
+            Changed: false));
     }
 
     private static Result<string> ValidateSolutionPath(string solutionPath)

@@ -36,28 +36,8 @@ Publish the server to a user-local location (`%LOCALAPPDATA%\RoslynMcp`):
 Output: `%LOCALAPPDATA%\RoslynMcp\RoslynMcp.Server.exe` (framework-dependent, plus dependencies).
 
 After a successful publish, `configure-clients.ps1` configures the user-scoped Claude Code
-and Codex MCP entries. It also sets `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` to this clone's
-`RoslynMcp.sln` when the user does not already have a valid bootstrap solution. Existing
-valid values are preserved. Restart Claude Code and Codex after publishing.
-
-Where that value lives is up to you. The script's default is the persistent *user* environment,
-because it is the one place both clients pick it up without further wiring, but the server only
-reads the variable out of its own process environment - a machine-scoped variable, one exported by
-whatever launches the client, or a literal path written straight into the client's `env` block all
-work the same. Whichever you choose, only processes started afterwards see it, which is the other
-reason the clients need restarting.
-
-To boot on a different solution, set the variable yourself before re-publishing; a value that
-already points at an existing file is preserved rather than repointed at this clone:
-
-```powershell
-[Environment]::SetEnvironmentVariable(
-    'ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH', 'D:\src\Other\Other.sln', 'User')
-```
-
-Pass `-SkipUserEnvironment` to `configure-clients.ps1` to write the MCP entries and leave the
-environment alone entirely - the right choice if you supply the variable some other way, or not
-at all. The server runs without it; it just exits when discovery finds no solution.
+and Codex MCP entries and removes the retired bootstrap environment variable from earlier
+installations. Restart Claude Code and Codex after publishing.
 
 To run tests:
 
@@ -67,8 +47,7 @@ dotnet test RoslynMcp.sln
 
 ## Client configuration
 
-`publish-local.ps1` writes these settings. The Claude Code entry in `~/.claude.json`
-includes the environment reference:
+`publish-local.ps1` writes these settings. The Claude Code entry in `~/.claude.json` is:
 
 ```json
 {
@@ -77,102 +56,53 @@ includes the environment reference:
       "type": "stdio",
       "command": "cmd",
       "args": ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"],
-      "env": {
-        "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH": "${ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}"
-      },
       "timeout": 120000
     }
   }
 }
 ```
 
-`${ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH}` expands from the environment the client was started in, so
-it resolves to nothing when no such variable exists. A literal path is equally valid there, and is
-the simpler option if you would rather not define the variable at all:
-
-```json
-"env": {
-  "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH": "D:\\src\\Other\\Other.sln"
-}
-```
-
-`configure-clients.ps1` rewrites this entry on every publish, so a hand-edited literal is replaced
-by the reference form again unless you keep the variable defined instead.
-
-Codex receives the matching whitelist in `~/.codex/config.toml`:
+Codex receives the matching entry in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.roslyn]
 command = "cmd"
 args = ["/c", "%LOCALAPPDATA%\\RoslynMcp\\RoslynMcp.Server.exe"]
-env_vars = ["ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"]
 tool_timeout_sec = 60
 startup_timeout_sec = 120
 ```
 
-No directory argument is needed. The server resolves the solution from the working directory Claude launches it in — see below.
+No directory argument is needed. The server makes one startup selection from the process working
+directory, then keeps that selection until an explicit selector call changes it.
 
 ### Solution resolution order
 
 1. `--solution-path <path>` CLI argument
 2. `ROSLYNMCP_SOLUTION_PATH` environment variable
-3. **Auto-discovery from CWD**: walk up to the enclosing git root (`.git` directory *or* file — git **worktrees** are supported), then locate the `.sln`/`.slnx` inside that repo.
-4. `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` environment variable - a fallback, not a pin.
+3. **Discovery from CWD**: walk up to the enclosing git root (`.git` directory or file, so git
+   worktrees are supported), then locate the `.sln`/`.slnx` inside that repo.
 
 Auto-discovery considers every solution filename, including `RoslynMcp.sln`, so the server can analyze its own checkout.
 
-Steps 1 and 2 are pins: either one switches workspace following off for that server process. Step 4
-is not. It exists because a working directory with no solution in it - a Python repository, a notes
-directory - fails discovery, and the server then exits before the MCP host is built, so
-`set_solution_root` does not yet exist to be called. Point it at any solution you are happy to load
-(the server's own checkout does) and the server starts with its tools available; the first workspace
-root a client reports moves it to the right solution. A bootstrap path that does not exist is logged
-and ignored rather than loaded.
+If none resolves, the MCP host starts unselected. `get_workspace_status` reports
+`isSolutionSelected: false`; solution-scoped tools return `NO_SOLUTION_SELECTED`; and no config or
+SQLite database is created. `set_solution_root` and `set_solution_path` remain available to make the
+first selection.
 
 `set_solution_path` switches the workspace, configuration and SQLite database as one operation.
 Existing tool calls finish first, and migrations run against the target database before it becomes active.
 
-Clients that can report their current directory can call `set_solution_root`. It repeats the same
-git-root and solution discovery, no-ops when the solution is unchanged, and uses the complete
-context switch when it changes. Explicit startup paths and a successful manual `set_solution_path`
-call pin the server for that process. Claude Code and Codex hook plugins are documented in
-[docs/install-roslyn-mcp.md](docs/install-roslyn-mcp.md).
+### Explicit, sticky selection
 
-### Install workspace-follow plugins
+`set_solution_root` repeats git-root and solution discovery for an explicit repository or worktree
+directory. `set_solution_path` selects an exact `.sln` or `.slnx`. Either successful call replaces
+the current solution, regardless of how it was selected, and the result remains active until another
+selector succeeds. A failed selector leaves the current solution unchanged.
 
-The server must be configured under the MCP name `roslyn`. Do not set `--solution-path` or
-`ROSLYNMCP_SOLUTION_PATH` when workspace following is wanted. `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` is
-safe to set alongside following, and is what keeps the server alive in a session started outside any
-solution.
-
-On each Claude Code workstation, run these commands inside Claude Code, then restart it:
-
-```text
-/plugin marketplace add RobsonSavage/RoslynMcp
-/plugin install roslyn-workspace-follow@roslyn-mcp
-```
-
-The Claude plugin handles ordinary directory changes and calls `set_solution_root` before each
-Roslyn tool. The pre-tool call is required because `EnterWorktree` does not emit `CwdChanged` in
-Claude Code 2.1.259.
-
-On each Codex workstation, run:
-
-```text
-codex plugin marketplace add RobsonSavage/RoslynMcp
-codex plugin add roslyn-workspace-follow@roslyn-mcp
-```
-
-Review and trust the installed hook, then start a new thread. Codex has no directory-change event,
-so the plugin calls `set_solution_root` before each `mcp__roslyn__*` tool. This flow was verified
-with a fresh Codex thread rooted in a different checkout. `get_workspace_status` reported that
-checkout's solution and recorded one `set_solution_root` invocation.
-
-OpenCode 1.18.27 reads the server instruction to call `set_solution_root`, but its plugin API cannot
-invoke a tool on an existing MCP connection. Start a new OpenCode session inside each worktree when
-deterministic selection is required.
-
-If the working directory is not inside a git repository, the server refuses to guess (it will not scan unrelated sibling trees) and exits with a clear message. Start Claude from inside the repository you want analyzed, pin the path via `--solution-path` / `ROSLYNMCP_SOLUTION_PATH`, or set `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` so the server starts anyway and can be moved with `set_solution_root`.
+Creating or entering a worktree does not change Roslyn automatically. A workflow that moves work to
+another checkout, such as `bug-implement`, must call `set_solution_root` with the verified worktree
+root and check that the returned `solutionPath` is inside it. Claude Code, Codex, Gemini and OpenCode
+expose the same logical selector with client-specific MCP prefixes.
 
 For multi-worktree / multi-session setups and advanced wrapper-script configuration, see [docs/install-roslyn-mcp.md](docs/install-roslyn-mcp.md).
 
@@ -180,8 +110,7 @@ For multi-worktree / multi-session setups and advanced wrapper-script configurat
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `ROSLYNMCP_SOLUTION_PATH` | Explicit solution to load (a pin; disables workspace following) | (auto-discover) |
-| `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` | Solution to boot on when discovery finds none; not a pin | (none: the server exits) |
+| `ROSLYNMCP_SOLUTION_PATH` | Initial solution selection; either selector can replace it later | (auto-discover or start unselected) |
 | `ROSLYNMCP_LOG_DIR` | Serilog file sink directory | `%LOCALAPPDATA%\RoslynMcp\logs` |
 | `ROSLYNMCP_WARMUP_PARALLELISM` | Projects compiled in parallel during `--warm-up` | `2` |
 
@@ -226,7 +155,6 @@ default below.
 |-----|---------|--------|
 | `workspace.watch_files` | `true` | Refresh the workspace from disk when source files change |
 | `workspace.idle_unload_minutes` | `30` | Unload the workspace after N minutes idle (0 = never) |
-| `workspace.follow_roots` | `true` | Allow client hooks to follow reported workspace roots |
 | `graph.auto_rebuild` | `true` | Rebuild the dependency graph after every solution load |
 | `logging.file_retention_days` | `7` | Prune matching server logs older than N days at startup |
 
@@ -307,16 +235,15 @@ looks right.
 
 `publish-local.ps1` calls `configure-clients.ps1`, which rewrites the user-scoped MCP entries in
 `~/.claude.json` and `~/.codex/config.toml` in place. It is idempotent: an entry that is already
-current is left alone, and an existing `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` that points at a real
-file is preserved rather than repointed at this clone. Nothing else in those files is touched.
+current is left alone, obsolete bootstrap forwarding is removed, and unrelated MCP environment
+entries are preserved. Nothing else in those files is touched.
 
 Both clients read MCP configuration only at startup, so the restart in step 6 is what actually
 picks up the new server. Per-solution state in `.roslyn-mcp-data\` is untouched by an update.
 
 ### Verify the update landed
 
-The server has no `--version` flag - it resolves a solution first and exits non-zero if it cannot.
-Read the versions out of the install directory instead:
+The server has no `--version` flag. Read the versions out of the install directory instead:
 
 ```powershell
 $d = Join-Path $env:LOCALAPPDATA 'RoslynMcp'
@@ -328,22 +255,6 @@ Both entries must read `2.0.0`. A `0.8.0-preview.1` means the install is stale n
 `git log` says, because the running server loads from this directory and not from your clone.
 Then, inside a restarted client, call `get_workspace_status` and check it reports the solution you
 expect.
-
-### Updating the workspace-follow plugin
-
-The plugin is distributed through the GitHub marketplace, separately from the published server, so
-`publish-local.ps1` does not update it. Refresh it from inside Claude Code and restart:
-
-```text
-/plugin marketplace update roslyn-mcp
-```
-
-Then restart Claude Code. The `/plugin` menu does the same thing interactively if you would rather
-see what is installed first.
-
-For Codex, re-run the two install commands (`codex plugin marketplace add RobsonSavage/RoslynMcp`
-then `codex plugin add roslyn-workspace-follow@roslyn-mcp`), re-trust the hook if prompted, and
-start a new thread.
 
 ### If the SDK moved on
 

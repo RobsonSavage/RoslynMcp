@@ -53,9 +53,9 @@ public class DefaultToolResultMapper : IToolResultMapper
         return Error(errorMessage);
     }
 
-    public CallToolResult Error(string message)
+    public CallToolResult Error(string message, string? errorCode = null)
     {
-        var json = JsonSerializer.Serialize(new ErrorResponse(message), s_jsonOptions);
+        var json = JsonSerializer.Serialize(new ErrorResponse(message, errorCode), s_jsonOptions);
         return new CallToolResult
         {
             Content = [new TextContentBlock { Text = json }],

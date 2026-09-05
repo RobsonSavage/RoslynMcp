@@ -38,28 +38,19 @@ try
 {
     // ── Parse CLI args ──
 
-    var commandLineSolutionPath = ParseArg(args, "--solution-path");
-    var environmentSolutionPath = Environment.GetEnvironmentVariable("ROSLYNMCP_SOLUTION_PATH");
-    var hasExplicitSolutionPin = !string.IsNullOrWhiteSpace(commandLineSolutionPath)
-        || !string.IsNullOrWhiteSpace(environmentSolutionPath);
+    var commandLineSolutionPath = NullIfWhiteSpace(ParseArg(args, "--solution-path"));
+    var environmentSolutionPath = NullIfWhiteSpace(
+        Environment.GetEnvironmentVariable("ROSLYNMCP_SOLUTION_PATH"));
     var solutionPath = commandLineSolutionPath
         ?? environmentSolutionPath
         ?? SolutionDiscovery.Discover(Directory.GetCurrentDirectory(), logger);
 
-    // A last resort, and deliberately not a pin. Discovery finds nothing in a
-    // tree that holds no solution - a Python repository, a notes directory - and
-    // the process exits here, before the MCP host is built, so `set_solution_root`
-    // is not reachable to rescue it. A bootstrap solution boots the server so its
-    // tools exist at all; it is kept out of `hasExplicitSolutionPin` so the first
-    // root a client reports still moves the server off it.
-    if (string.IsNullOrWhiteSpace(solutionPath))
-        solutionPath = ResolveBootstrapSolution(logger);
-
     if (string.IsNullOrWhiteSpace(solutionPath))
     {
-        logger.Fatal("No solution found. Pass --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH or ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH, or start Claude inside a git repository that contains a .sln/.slnx file");
-        Console.Error.WriteLine("Error: No solution resolved from CWD. Use --solution-path <path>, set ROSLYNMCP_SOLUTION_PATH or ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH, or start Claude inside a git repository that contains a .sln/.slnx file.");
-        return 2;
+        solutionPath = null;
+        logger.Information(
+            "No solution discovered from {WorkingDirectory}; starting without a selected solution",
+            Directory.GetCurrentDirectory());
     }
 
     var msbuildPath = ParseArg(args, "--msbuild-path");
@@ -78,35 +69,29 @@ try
         MSBuildLocator.RegisterDefaults();
     }
 
-    // ── Initialize workspace ──
-
-    logger.Information("Opening solution: {SolutionPath}", solutionPath);
-    await using var workspaceProvider = await MsBuildWorkspaceProvider.CreateAsync(solutionPath, logger, warmUp);
-
-    // -- Initialize solution-scoped runtime --
-
     var migrations = new IMigration[]
     {
         new V1_MemoryTables(), new V2_GraphTables(), new V3_KBTables(), new V4_GraphProvenance()
     };
-    await using var solutionRuntime = await SolutionRuntime.CreateAsync(
-        workspaceProvider,
+
+    // -- Initialize workspace and solution-scoped runtime --
+
+    if (solutionPath != null)
+        logger.Information("Opening solution: {SolutionPath}", solutionPath);
+    var initialContext = await CreateInitialSolutionContextAsync(
         solutionPath,
         migrations,
-        logger);
+        logger,
+        warmUp);
+    await using var workspaceProviderLifetime = initialContext.WorkspaceProvider;
+    await using var solutionRuntimeLifetime = initialContext.SolutionRuntime;
+    var workspaceProvider = initialContext.WorkspaceProvider;
+    var solutionRuntime = initialContext.SolutionRuntime;
     var configManager = solutionRuntime.Config;
     var workspaceSelection = new WorkspaceSelectionService(
         workspaceProvider,
         solutionRuntime,
-        configManager,
-        hasExplicitSolutionPin,
         logger);
-
-    var retentionConfig = configManager.Get("logging.file_retention_days");
-    var retentionDays = int.TryParse(retentionConfig.Value, out var rd) ? rd
-        : int.TryParse(retentionConfig.DefaultValue, out var rdd) ? rdd
-        : 7;
-    ServerLogging.Prune(logDir, retentionDays, logger);
 
     // ── Build host with DI ──
 
@@ -132,7 +117,8 @@ try
     }
 
     builder.Services.AddSingleton(configManager);
-    builder.Services.AddSingleton<IToolResultMapper>(new DefaultToolResultMapper(workspaceProvider));
+    var toolResultMapper = new DefaultToolResultMapper(workspaceProvider);
+    builder.Services.AddSingleton<IToolResultMapper>(toolResultMapper);
     builder.Services.AddSingleton<IToolMetricsService>(new ToolMetricsService());
 
     // Core services (transient - created per tool class resolution)
@@ -180,34 +166,10 @@ try
         sp.GetRequiredService<IWorkspaceProvider>(),
         sp.GetRequiredService<Serilog.ILogger>()));
 
-    // ── Idle workspace unload ──
-
-    // No config file, or no such key, or an unparseable one: fall back to the declared default
-    // rather than silently disabling idle unload.
-    var idleConfig = configManager.Get("workspace.idle_unload_minutes");
-    var idleMinutes = int.TryParse(idleConfig.Value, out var im) ? im
-        : int.TryParse(idleConfig.DefaultValue, out var dm) ? dm
-        : 0;
-    workspaceProvider.StartIdleMonitor(TimeSpan.FromMinutes(idleMinutes));
-
-    // ── Disk staleness ──
-
-    var watchConfig = configManager.Get("workspace.watch_files");
-    var watchFiles = bool.TryParse(watchConfig.Value, out var wf) ? wf
-        : !bool.TryParse(watchConfig.DefaultValue, out var wd) || wd;
-    if (watchFiles)
-        workspaceProvider.StartFileWatcher();
-    else
-        logger.Information("File watching disabled; tools may answer from a stale snapshot");
-
     // ── Dependency graph ──
 
     // The graph is derived from the project list and project references, so a solution reload
     // invalidates all of it. Rebuilding walks the project graph without compiling anything.
-    var rebuildConfig = configManager.Get("graph.auto_rebuild");
-    var autoRebuildGraph = bool.TryParse(rebuildConfig.Value, out var ar) ? ar
-        : bool.TryParse(rebuildConfig.DefaultValue, out var ad) && ad;
-
     void RebuildGraphInBackground()
     {
         _ = Task.Run(async () =>
@@ -226,23 +188,54 @@ try
         });
     }
 
-    if (autoRebuildGraph)
+    void ApplySolutionConfiguration()
     {
-        RebuildGraphInBackground();
-        workspaceProvider.SolutionChanged += (_, e) =>
+        var retentionConfig = configManager.Get("logging.file_retention_days");
+        var retentionDays = int.TryParse(retentionConfig.Value, out var rd) ? rd
+            : int.TryParse(retentionConfig.DefaultValue, out var rdd) ? rdd
+            : 7;
+        ServerLogging.Prune(logDir, retentionDays, logger);
+
+        var idleConfig = configManager.Get("workspace.idle_unload_minutes");
+        var idleMinutes = int.TryParse(idleConfig.Value, out var im) ? im
+            : int.TryParse(idleConfig.DefaultValue, out var dm) ? dm
+            : 0;
+        workspaceProvider.StartIdleMonitor(TimeSpan.FromMinutes(idleMinutes));
+
+        var watchConfig = configManager.Get("workspace.watch_files");
+        var watchFiles = bool.TryParse(watchConfig.Value, out var wf) ? wf
+            : !bool.TryParse(watchConfig.DefaultValue, out var wd) || wd;
+        if (watchFiles)
+            workspaceProvider.StartFileWatcher();
+        else
         {
-            // A null NewSolution is an idle unload; the reload that follows raises its own event.
-            if (e.NewSolution != null)
-                RebuildGraphInBackground();
-        };
-        logger.Information("Dependency graph auto-rebuild enabled");
+            workspaceProvider.StopFileWatcher();
+            logger.Information("File watching disabled; tools may answer from a stale snapshot");
+        }
+
+        var rebuildConfig = configManager.Get("graph.auto_rebuild");
+        var autoRebuildGraph = bool.TryParse(rebuildConfig.Value, out var ar) ? ar
+            : bool.TryParse(rebuildConfig.DefaultValue, out var ad) && ad;
+        if (autoRebuildGraph)
+            RebuildGraphInBackground();
     }
+
+    workspaceProvider.SolutionChanged += (_, e) =>
+    {
+        // A null NewSolution is an idle unload; the reload that follows raises its own event.
+        if (e.NewSolution != null)
+            ApplySolutionConfiguration();
+    };
+    if (workspaceProvider.SolutionPath != null)
+        ApplySolutionConfiguration();
 
     // MCP server
     builder.Services
         .AddMcpServer(options => options.ServerInstructions =
-            "Before the first Roslyn tool call in a workspace, and after any working-directory or git-worktree change, call set_solution_root with rootPath set to the client's absolute current workspace directory. " +
-            "Do not retry when it reports that following is disabled by an explicit solution pin. A successful switch also changes the solution-scoped config and SQLite memory, knowledge-base, and graph data.")
+            "Startup selects a solution once from --solution-path, ROSLYNMCP_SOLUTION_PATH, or the process working directory. " +
+            "The selected solution remains active until a successful set_solution_root or set_solution_path call replaces it. " +
+            "When intentionally moving work to another repository or worktree, call set_solution_root with that absolute directory and validate the returned solutionPath. " +
+            "Use set_solution_path when selecting an exact .sln or .slnx file. A successful selection also changes the solution-scoped config and SQLite memory, knowledge-base, and graph data.")
         .WithStdioServerTransport()
         .WithToolsFromAssembly()
         .WithRequestFilters(filters => filters.AddCallToolFilter(next => async (context, ct) =>
@@ -257,6 +250,13 @@ try
                 // Every other tool takes a read lease so no caller can observe a mixed context.
                 if (toolName is not ("set_solution_path" or "set_solution_root"))
                     contextLease = await solutionRuntime.EnterReadAsync(ct);
+
+                if (RequiresSolutionContext(toolName) && workspaceProvider.SolutionPath == null)
+                {
+                    return toolResultMapper.Error(
+                        "Select a solution with set_solution_root or set_solution_path before calling this tool.",
+                        "NO_SOLUTION_SELECTED");
+                }
 
                 // Reload the workspace if it was idle-unloaded, and hold the in-flight count for
                 // the duration so the sweep cannot unload underneath this call.
@@ -313,33 +313,86 @@ static bool NeedsWorkspace(string? toolName)
     return toolName is not ("tool_enabled" or "get_workspace_status" or "set_solution_path" or "set_solution_root");
 }
 
-// The bootstrap solution, or null. Read only after discovery has already failed, so a working
-// directory that resolves a solution of its own never sees it.
-//
-// A missing file is a warning and not a failure: the alternative is throwing out of
-// MsBuildWorkspaceProvider several frames later, where the message names MSBuild rather than the
-// misconfigured variable. Falling through leaves the caller's "no solution resolved" error, which
-// is the one a reader can act on.
-static string? ResolveBootstrapSolution(Serilog.ILogger logger)
+static bool RequiresSolutionContext(string? toolName)
 {
-    var bootstrap = Environment.GetEnvironmentVariable("ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH");
-    if (string.IsNullOrWhiteSpace(bootstrap)) return null;
+    return toolName is not ("get_workspace_status" or "set_solution_path" or "set_solution_root");
+}
 
-    bootstrap = bootstrap.Trim();
-    if (!File.Exists(bootstrap))
+static string? NullIfWhiteSpace(string? value) =>
+    string.IsNullOrWhiteSpace(value) ? null : value;
+
+static async Task<MsBuildWorkspaceProvider> CreateWorkspaceProviderAsync(
+    string? solutionPath,
+    Serilog.ILogger logger,
+    bool warmUp)
+{
+    try
     {
-        logger.Warning(
-            "ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH points at {SolutionPath}, which does not exist; ignoring it",
-            bootstrap);
-        return null;
+        return await MsBuildWorkspaceProvider.CreateAsync(solutionPath, logger, warmUp);
     }
+    catch (Exception ex) when (ex is not OperationCanceledException && solutionPath != null)
+    {
+        logger.Error(
+            ex,
+            "Initial solution {SolutionPath} could not be loaded; starting without a selected solution",
+            solutionPath);
+        Console.Error.WriteLine(
+            "Warning: Initial solution could not be loaded; starting without a selected solution.");
+        return await MsBuildWorkspaceProvider.CreateAsync(solutionPath: null, logger, warmUp: false);
+    }
+}
 
-    logger.Information(
-        "No solution discovered from {WorkingDirectory}; booting on bootstrap solution {SolutionPath}. "
-            + "This is not a pin - workspace root following stays enabled",
-        Directory.GetCurrentDirectory(),
-        bootstrap);
-    return bootstrap;
+static async Task<(
+    MsBuildWorkspaceProvider WorkspaceProvider,
+    SolutionRuntime SolutionRuntime)> CreateInitialSolutionContextAsync(
+        string? solutionPath,
+        IReadOnlyList<IMigration> migrations,
+        Serilog.ILogger logger,
+        bool warmUp)
+{
+    var workspace = await CreateWorkspaceProviderAsync(solutionPath, logger, warmUp);
+    try
+    {
+        var runtime = await SolutionRuntime.CreateAsync(
+            workspace,
+            workspace.SolutionPath,
+            migrations,
+            logger);
+        return (workspace, runtime);
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException && workspace.SolutionPath != null)
+    {
+        logger.Error(
+            ex,
+            "Initial solution data context could not be initialized; starting without a selected solution");
+        Console.Error.WriteLine(
+            "Warning: Initial solution data context could not be initialized; starting without a selected solution.");
+        await workspace.DisposeAsync();
+
+        var unselectedWorkspace = await MsBuildWorkspaceProvider.CreateAsync(
+            solutionPath: null,
+            logger,
+            warmUp: false);
+        try
+        {
+            var unselectedRuntime = await SolutionRuntime.CreateAsync(
+                unselectedWorkspace,
+                solutionPath: null,
+                migrations,
+                logger);
+            return (unselectedWorkspace, unselectedRuntime);
+        }
+        catch
+        {
+            await unselectedWorkspace.DisposeAsync();
+            throw;
+        }
+    }
+    catch
+    {
+        await workspace.DisposeAsync();
+        throw;
+    }
 }
 
 // Note: values starting with "--" are treated as flags, not values. Use --key=value syntax for such values.

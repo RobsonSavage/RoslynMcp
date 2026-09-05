@@ -108,21 +108,15 @@ coordinated through the CallTool filter and `SolutionRuntime`:
 - **Solution switching.** `SolutionRuntime` takes an exclusive lease while it switches the
   workspace, configuration and routed SQLite pool. Other tools and background graph rebuilds take
   read leases, so they cannot observe a mixed solution context.
-- **Client workspace following.** `set_solution_root` runs the startup discovery walk for a
-  client-reported directory and switches only when it resolves a different solution. An explicit
-  `--solution-path` / `ROSLYNMCP_SOLUTION_PATH` pin, or a successful manual `set_solution_path`,
-  disables following for that server process. `workspace.follow_roots` is the solution-scoped kill
-  switch.
-- **Bootstrap solution.** `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` is consulted only after discovery has
-  failed, and is deliberately kept out of `hasExplicitSolutionPin`, so the server starts in a tree
-  holding no solution and following still moves it off. Anything that folds it into the pin turns a
-  server that never starts into a server that starts and never follows.
-
-Client adapters live under `plugins/`. Keep the Claude plugin's `PreToolUse` fallback:
-`EnterWorktree` does not emit `CwdChanged` in Claude Code 2.1.259. Codex has no `CwdChanged` event,
-so its plugin also follows from `PreToolUse`. OpenCode 1.18.27 has no plugin API for invoking a tool
-on an existing MCP connection and relies on the server instruction instead. See
-`docs/install-roslyn-mcp.md` for installation and fallback flows.
+- **Explicit solution selection.** Startup selects once from `--solution-path`,
+  `ROSLYNMCP_SOLUTION_PATH`, or CWD discovery. `set_solution_root` runs that discovery for an
+  explicit repo/worktree directory; `set_solution_path` selects an exact solution. Either selector
+  replaces any prior selection, which then remains active until another selector succeeds.
+- **Unselected startup.** When startup resolves no solution, the host still starts. Only
+  `get_workspace_status`, `set_solution_root`, and `set_solution_path` are callable; every
+  solution-scoped tool returns `NO_SOLUTION_SELECTED`. Starting unselected creates no config file
+  or SQLite database. A selector initializes the target data before swapping the workspace, so a
+  failed attempt can leave those files for a retry while the active context remains unselected.
 
 Rules if you touch this:
 
@@ -133,6 +127,8 @@ Rules if you touch this:
 - `NeedsWorkspace(toolName)` in `Program.cs` decides whether a tool forces a reload. Memory, KB,
   session and config tools do not need a solution; anything else does. Add new prefixes there
   rather than making the tool tolerate an unloaded workspace.
+- `RequiresSolutionContext(toolName)` is the unselected-startup gate. Keep the status and selector
+  tools available there; do not let a solution-scoped tool reach the unbound config/database.
 - Every tool except `set_solution_path` and `set_solution_root` takes
   `SolutionRuntime.EnterReadAsync()` in the CallTool filter. Both selection tools take the write
   lease inside `SolutionRuntime.SwitchAsync`; taking a read lease around either one deadlocks the
@@ -203,15 +199,13 @@ change under test can appear to fail, or to pass, on a binary that does not cont
 - **`ProjectId` is a fresh GUID on every solution load.** Anything persisted must key off the
   project file path instead. The dependency graph used to key nodes by `ProjectId` and was orphaned
   by every restart.
-- **Startup resolution fails before the host exists.** `Program.cs` returns 2 when no solution
-  resolves, several lines before `Host.CreateEmptyApplicationBuilder`, so no tool - `set_solution_root`
-  included - can rescue a working directory that holds no solution. That is what
-  `ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH` exists for, and why a fix at the tool layer cannot work.
-- **`ROSLYNMCP_SOLUTION_PATH` beats CWD discovery.** A stale User-scope environment variable makes
-  every worktree analyse the same solution, and it is invisible in the logs unless you look for the
-  resolved path. It also disables client workspace following. Check it first when a worktree
-  reports the wrong code.
-- **Following a workspace swaps solution-scoped data.** `set_solution_root` uses the same complete
+- **Unselected is distinct from idle-unloaded.** An unselected provider has no retained solution
+  path and cannot create solution-scoped state. An idle-unloaded provider retains its path so the
+  next workspace tool can reload it.
+- **`ROSLYNMCP_SOLUTION_PATH` beats CWD discovery at startup.** A stale User-scope environment
+  variable chooses the wrong initial solution, and it is invisible unless you inspect the resolved
+  path. Either selector can replace it after startup.
+- **Selecting a workspace swaps solution-scoped data.** `set_solution_root` uses the same complete
   context switch as `set_solution_path`, so config, memory, KB and graph tools immediately route to
   the target solution's `.roslyn-mcp-data` directory.
 - **CWD discovery includes `RoslynMcp.sln`.** The server's checkout is a valid target, so

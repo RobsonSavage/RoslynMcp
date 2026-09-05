@@ -129,7 +129,7 @@ The v2 server's data directory (`.roslyn-mcp-v2/`) is completely independent fro
 ```
 RoslynMcp.Server.exe [options]
 
-  --solution-path <path>   Path to .sln file (required)
+  --solution-path <path>   Initial .sln/.slnx selection (optional)
   --msbuild-path <path>    Path to MSBuild (auto-detected if omitted)
   --import-from <path>     Import config from v1 config.json
   --force                  Overwrite existing v2 config during import

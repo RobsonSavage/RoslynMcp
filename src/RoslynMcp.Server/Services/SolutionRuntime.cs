@@ -20,13 +20,13 @@ public sealed class SolutionRuntime : ISqliteConnectionPool, ISolutionContextSwi
     private readonly IReadOnlyList<IMigration> _migrations;
     private readonly ILogger _logger;
     private readonly AsyncReaderWriterLock _contextLock = new();
-    private SqliteConnectionPool _pool;
+    private SqliteConnectionPool? _pool;
     private int _disposed;
 
     private SolutionRuntime(
         IWorkspaceProvider workspace,
         ConfigManager config,
-        SqliteConnectionPool pool,
+        SqliteConnectionPool? pool,
         IReadOnlyList<IMigration> migrations,
         ILogger logger)
     {
@@ -45,11 +45,19 @@ public sealed class SolutionRuntime : ISqliteConnectionPool, ISolutionContextSwi
 
     public static async Task<SolutionRuntime> CreateAsync(
         IWorkspaceProvider workspace,
-        string solutionPath,
+        string? solutionPath,
         IReadOnlyList<IMigration> migrations,
         ILogger logger,
         CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(solutionPath))
+            return new SolutionRuntime(
+                workspace,
+                new ConfigManager(configDir: null, logger),
+                pool: null,
+                migrations,
+                logger);
+
         var dataDir = ResolveDataDirectory(solutionPath, logger);
         var config = new ConfigManager(dataDir, logger);
         var pool = await CreatePoolAsync(dataDir, config, migrations, logger, ct).ConfigureAwait(false);
@@ -88,7 +96,7 @@ public sealed class SolutionRuntime : ISqliteConnectionPool, ISolutionContextSwi
         using var contextLease = await _contextLock.WriterLockAsync(ct).ConfigureAwait(false);
         ThrowIfDisposed();
         var fullPath = Path.GetFullPath(solutionPath);
-        var previousPath = _workspace.CurrentSolution?.FilePath;
+        var previousPath = _workspace.SolutionPath;
         var previousConfigDir = Config.ConfigDirectory;
         var dataDir = ResolveDataDirectory(fullPath, _logger);
         SqliteConnectionPool? targetPool = null;
@@ -113,7 +121,8 @@ public sealed class SolutionRuntime : ISqliteConnectionPool, ISolutionContextSwi
             _pool = targetPool;
             targetPool = null;
             committed = true;
-            await oldPool.DisposeAsync().ConfigureAwait(false);
+            if (oldPool != null)
+                await oldPool.DisposeAsync().ConfigureAwait(false);
 
             var solution = _workspace.CurrentSolution;
             var projectCount = solution?.ProjectIds.Count ?? 0;
@@ -122,7 +131,7 @@ public sealed class SolutionRuntime : ISqliteConnectionPool, ISolutionContextSwi
             _logger.Information(
                 "Solution context switched to {SolutionPath} with database {DatabasePath}",
                 fullPath,
-                _pool.DatabasePath);
+                CurrentPool.DatabasePath);
 
             return new SetSolutionPathResponse(fullPath, projectCount, documentCount, previousPath);
         }
@@ -141,7 +150,8 @@ public sealed class SolutionRuntime : ISqliteConnectionPool, ISolutionContextSwi
             return;
 
         using var contextLease = await _contextLock.WriterLockAsync().ConfigureAwait(false);
-        await _pool.DisposeAsync().ConfigureAwait(false);
+        if (_pool != null)
+            await _pool.DisposeAsync().ConfigureAwait(false);
     }
 
     private SqliteConnectionPool CurrentPool
@@ -149,7 +159,9 @@ public sealed class SolutionRuntime : ISqliteConnectionPool, ISolutionContextSwi
         get
         {
             ThrowIfDisposed();
-            return Volatile.Read(ref _pool);
+            return Volatile.Read(ref _pool)
+                ?? throw new InvalidOperationException(
+                    "NO_SOLUTION_SELECTED: Select a solution with set_solution_root or set_solution_path.");
         }
     }
 

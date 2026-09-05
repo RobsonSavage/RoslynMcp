@@ -345,11 +345,10 @@ public class UtilTools
 
     // ── 10. set_solution_root ──
 
-    [McpServerTool(Name = "set_solution_root"), Description("Discover and follow the solution in a client workspace root unless solution selection is pinned")]
+    [McpServerTool(Name = "set_solution_root"), Description("Discover and select the solution in a repository or worktree root")]
     public async Task<CallToolResult> SetSolutionRoot(
-        [Description("Absolute path to the client's current workspace directory")] string rootPath,
+        [Description("Absolute path to the repository or worktree directory to select")] string rootPath,
         [Description("Warm up compilations after loading")] bool warmUp = false,
-        [Description("Return a valid no-op PreToolUse response after following the workspace")] bool hookOutput = false,
         CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
@@ -364,7 +363,7 @@ public class UtilTools
                 isError = true;
                 return _mapper.Error(result.Error?.Message ?? "Unknown error");
             }
-            return hookOutput ? _mapper.Success(new { }) : _mapper.Success(result.Value);
+            return _mapper.Success(result.Value);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
