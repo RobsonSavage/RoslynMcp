@@ -28,7 +28,7 @@ public partial class StructureService
         }
 
         return Task.FromResult(Result<SolutionStructureResponse>.Ok(
-            new SolutionStructureResponse(solution.FilePath ?? "", projects)));
+            new SolutionStructureResponse(_workspace.SolutionPath ?? solution.FilePath ?? "", projects)));
     }
 
     // ── 2. get_project_structure ──

@@ -132,7 +132,7 @@ public class UtilService
 
 
         return new WorkspaceStatusResponse(
-            solution.FilePath ?? "",
+            _workspace.SolutionPath ?? solution.FilePath ?? "",
             projectCount,
             documentCount,
             errorCount,
