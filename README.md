@@ -157,6 +157,59 @@ default below.
 | `workspace.idle_unload_minutes` | `30` | Unload the workspace after N minutes idle (0 = never) |
 | `graph.auto_rebuild` | `true` | Rebuild the dependency graph after every solution load |
 | `logging.file_retention_days` | `7` | Prune matching server logs older than N days at startup |
+| `logging.level` | `Information` | Serilog minimum level |
+| `timeout.default` | `30` | Default per-tool timeout in seconds. `timeout.<tool_name>` overrides one tool |
+| `warmup.enabled` | `false` | Compile projects on start rather than on first query |
+| `warmup.parallelism` | `0` | Projects compiled in parallel during warmup (0 = ProcessorCount/2) |
+| `paging.default_page_size` | `5` | Page size for paged results when the caller does not ask for one |
+| `paging.max_page_size` | `200` | Ceiling on a caller-supplied page size |
+| `sqlite.busy_timeout_ms` | `1000` | SQLite busy timeout |
+| `sqlite.cache_size_kb` | `16000` | SQLite page cache |
+
+`tools.<tool_name>.enabled` keys hold per-tool enable/disable state and are read and written
+through `tool_enabled`. `workspace.follow_roots` is retired: `config_set` rejects it, and loading a
+`config.json` that still contains it strips the key and rewrites the file.
+
+## Using the tools
+
+### Coordinates are 0-based, in both directions
+
+Every `line`/`column` parameter is 0-based, and the column must land **inside the identifier
+token** - the method, type or variable name itself. A column at the start of the line, on a
+modifier keyword or on the return type resolves nothing and the tool answers
+`No symbol found at position`. That is a miss, not a fault.
+
+Coordinates the server emits - `text_search` hits, `get_file_outline`, the
+`definitions[].location` of `find_definition` - are raw `LinePosition` values, 0-based and
+unconverted. So they chain verbatim: feed a `text_search` hit straight into `find_definition`,
+`find_callers` or `find_references` with no adjustment. Adding 1 first aims a line late and
+produces `No symbol found at position` on a symbol that is really there.
+
+Convert to 1-based only when a coordinate is going in front of a human, into a `file.cs:line`
+reference, or into an editor. Roslyn's line 112 is your editor's line 113.
+
+Where a tool accepts a name instead (`get_type_info` takes `typeName`, `understand_type` takes a
+fully-qualified type name), prefer the name - it avoids the coordinate question entirely.
+
+### Locate with `text_search`, answer with the semantic tools
+
+`text_search` is grep and carries no more meaning than grep. Use it to find a coordinate, then
+answer the question with `find_references`, `find_implementations`, `find_callers` or
+`get_method_body`. A text hit on a property shows its declaration and its setter and reads like
+evidence of use; `find_references` on the same property is what tells you whether anything
+actually calls it.
+
+### `get_workspace_status` has two limits
+
+It confirms `solutionPath` and `isSolutionSelected`, both read from the live workspace. But
+`isFullyLoaded` is not a measurement - it is `false` on the unselected path and the literal `true`
+on the loaded path, so it can never report a partially loaded workspace. And it takes no
+arguments, which makes it the one tool a malformed-argument fault cannot reach. A green status
+next to a failing tool means the failing call's arguments are wrong, not that the workspace is
+broken. Confirm with a query that passes real parameters.
+
+An `An error occurred invoking '<tool>'` from the MCP host is a rejected call, not a dead server;
+the validation detail is usually swallowed by the client. Re-read the tool schema and re-issue.
 
 ## Tools
 

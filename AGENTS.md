@@ -89,6 +89,9 @@ Notes on that shape:
 - Argument validation happens in the wrapper (`ToolValidation.ValidateFilePath` for paths), so the
   service can assume well-formed input but still returns `Result` failures for domain errors.
 - Every parameter needs a `[Description]`; it is the only thing the calling agent sees.
+- A position parameter is named `line`/`column` (or `startLine`/`startColumn`), is 0-based, and
+  says so in its `[Description]`. A file parameter is `filePath`; a search parameter is `pattern`.
+  The calling agent guesses from these names, so a one-off spelling costs it a failed call.
 - Tools are discovered by `WithToolsFromAssembly()`. There is no registration list to update.
 - Tool classes are constructed per call, so they hold no state.
 
@@ -216,6 +219,26 @@ change under test can appear to fail, or to pass, on a binary that does not cont
 - **Serilog sink retention is per file sequence.** Concurrent servers create `_NNN` sequences, so
   `ServerLogging.Prune` applies age-based retention across all `server-*.log` files at startup.
   Log entries include `pid` so concurrent server output can be attributed to a process.
+- **Positions are 0-based on the way in and on the way out, and nothing converts at the boundary.**
+  `line`/`column` parameters are 0-based `LinePosition` values, and `text_search`,
+  `get_file_outline` and `find_definition` emit the same raw values. That is what lets a caller
+  chain a search hit straight into `find_callers`. Do not "fix" an emitted coordinate to 1-based
+  anywhere in the server; a display conversion belongs in the caller, not here.
+- **`SymbolResolver` answers `No symbol found at position` for any column outside the identifier
+  token.** It is the expected result for an off-by-one column, so do not add a fuzzy fallback that
+  widens the search to the whole line - it would turn a precise miss into a plausible wrong symbol.
+- **`isFullyLoaded` in `get_workspace_status` is a literal, not a measurement.** It is `false` on
+  the unselected path (`UtilService.cs:110`) and hardcoded `true` on the loaded path (`:141`).
+  Nothing samples load progress, so it cannot report a partially loaded workspace. Do not cite it
+  as evidence in a diagnosis, and do not make a caller depend on it meaning more than it does.
+- **`get_workspace_status` takes no arguments**, which makes it the one tool that a malformed-
+  argument fault cannot reach. When a tool fails and status is green, suspect the failing call's
+  arguments before the workspace.
+- **Nothing re-points the server at the client's working directory, deliberately.** A
+  `roslyn-workspace-follow` plugin used to reset the solution to `${cwd}` before every call;
+  `13192ef` removed it and both marketplace manifests, because it silently overrode the explicit
+  worktree selection that a worktree workflow depends on. Do not reinstate a follow hook.
+  `workspace.follow_roots` is in `ConfigManager.s_retiredKeys` as the tail of that removal.
 - **Services registered `AddTransient` get a new instance per tool call.** Any counter or cache on
   a service field silently resets. `GraphService` is a singleton for exactly this reason.
 
