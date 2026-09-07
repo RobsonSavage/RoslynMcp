@@ -20,10 +20,14 @@ function Invoke-ConfigScript {
 
     $parameters = @{
         UserProfilePath = $ProfilePath
+        ServerPath = $script:serverPath
         SkipUserEnvironment = $true
     }
     & $ScriptPath @parameters
 }
+
+# A space is the case that breaks a cmd-routed launcher, so every assertion below runs against one.
+$script:serverPath = "C:\Program Files\Agent Tools\RoslynMcp\RoslynMcp.Server.exe"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot "configure-clients.ps1"
@@ -99,6 +103,9 @@ command = "other-server"
     Assert-True (
         $null -eq $claude.mcpServers.roslyn.env.PSObject.Properties["ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"]
     ) "Claude bootstrap environment forwarding is removed"
+    Assert-True ($claude.mcpServers.roslyn.command -eq $script:serverPath) "A cmd-routed Claude entry is migrated to the executable"
+    Assert-True (@($claude.mcpServers.roslyn.args).Count -eq 0) "The migrated Claude entry has no arguments"
+    Assert-True ($claude.mcpServers.roslyn.timeout -eq 120000) "The migrated Claude entry keeps its timeout"
 
     $codexPath = Join-Path $profilePath ".codex\config.toml"
     $codexText = [IO.File]::ReadAllText($codexPath)
@@ -106,6 +113,12 @@ command = "other-server"
     Assert-True (
         -not $codexText.Contains('"ROSLYNMCP_BOOTSTRAP_SOLUTION_PATH"')
     ) "Codex bootstrap whitelist is removed"
+    Assert-True (
+        $codexText.Contains('command = "' + $script:serverPath.Replace('\', '\\') + '"')
+    ) "A cmd-routed Codex section is migrated to the executable"
+    Assert-True ($codexText.Contains('args = []')) "The migrated Codex section has no arguments"
+    Assert-True ($codexText.Contains('[mcp_servers.other]')) "Other Codex sections are preserved"
+    Assert-True ($codexText.Contains('startup_timeout_sec = 120')) "Other Codex settings in the section are preserved"
 
     $codex = Get-Command codex -ErrorAction SilentlyContinue
     if ($null -ne $codex) {
@@ -126,7 +139,7 @@ command = "other-server"
 
     Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $newProfilePath
     $newClaude = Get-Content -Raw -LiteralPath (Join-Path $newProfilePath ".claude.json") | ConvertFrom-Json
-    Assert-True ($newClaude.mcpServers.roslyn.command -eq "cmd") "Missing Claude configuration is created"
+    Assert-True ($newClaude.mcpServers.roslyn.command -eq $script:serverPath) "Missing Claude configuration is created"
     Assert-True ($null -eq $newClaude.mcpServers.roslyn.PSObject.Properties["env"]) "New Claude entry has no bootstrap environment"
     $newCodex = [IO.File]::ReadAllText((Join-Path $newProfilePath ".codex\config.toml"))
     Assert-True ($newCodex.Contains("[mcp_servers.roslyn]")) "Missing Codex configuration is created"
@@ -144,7 +157,7 @@ command = "other-server"
     Invoke-ConfigScript -ScriptPath $scriptPath -ProfilePath $plainProfilePath
     $plainClaude = Get-Content -Raw -LiteralPath (Join-Path $plainProfilePath ".claude.json") | ConvertFrom-Json
     Assert-True ($plainClaude.theme -eq "light") "Claude settings survive adding mcpServers"
-    Assert-True ($plainClaude.mcpServers.roslyn.command -eq "cmd") "Claude mcpServers is added"
+    Assert-True ($plainClaude.mcpServers.roslyn.command -eq $script:serverPath) "Claude mcpServers is added"
     $plainCodex = [IO.File]::ReadAllText((Join-Path $plainProfilePath ".codex\config.toml"))
     Assert-True ($plainCodex.Contains('model = "test"')) "Codex settings survive adding the server"
     Assert-True ($plainCodex.Contains("[mcp_servers.roslyn]")) "Codex roslyn section is added"
