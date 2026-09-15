@@ -1,4 +1,4 @@
-using Microsoft.CodeAnalysis.Text;
+using Microsoft.CodeAnalysis;
 using RoslynMcp.Core.Helpers;
 using RoslynMcp.Shared;
 using RoslynMcp.Shared.Contracts.Search;
@@ -80,7 +80,18 @@ public partial class SearchService
                         continue;
                 }
 
-                var text = await doc.GetTextAsync(ct).ConfigureAwait(false);
+                if (!doc.TryGetText(out var text))
+                {
+                    // Roslyn retries missing files for a second each, accumulating across stale build outputs.
+                    if (solution.Workspace.Kind == WorkspaceKind.MSBuild &&
+                        doc.FilePath != null && !File.Exists(doc.FilePath))
+                    {
+                        _logger.Warning("text_search: Skipping missing file: {File}", doc.FilePath);
+                        continue;
+                    }
+
+                    text = await doc.GetTextAsync(ct).ConfigureAwait(false);
+                }
 
                 // Skip files larger than 1MB to avoid LOH pressure
                 if (text.Length > 1_048_576)

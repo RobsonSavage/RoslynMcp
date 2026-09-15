@@ -400,6 +400,40 @@ namespace MyApp.Tests
         Assert.Equal(4, barMatch.Line);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TextSearch_MissingFilesDoNotDelayAvailableMatches(bool isRegex)
+    {
+        using var workspace = new AdhocWorkspace(
+            Microsoft.CodeAnalysis.Host.Mef.MefHostServices.DefaultHost, WorkspaceKind.MSBuild);
+        var projectId = workspace.AddProject("MyApp", LanguageNames.CSharp).Id;
+        var missingDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        for (var i = 0; i < 3; i++)
+        {
+            var name = $"Missing{i}.g.cs";
+            var path = Path.Combine(missingDirectory, name);
+            workspace.AddDocument(DocumentInfo.Create(
+                DocumentId.CreateNewId(projectId), name,
+                loader: new FileTextLoader(path, defaultEncoding: null), filePath: path));
+        }
+        var availablePath = Path.Combine(missingDirectory, "Available.cs");
+        var available = workspace.AddDocument(DocumentInfo.Create(
+            DocumentId.CreateNewId(projectId), "Available.cs",
+            loader: TextLoader.From(TextAndVersion.Create(
+                SourceText.From("class ChildHasRecords { }"), VersionStamp.Create(), availablePath)),
+            filePath: availablePath));
+        var cachedText = await available.GetTextAsync();
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var result = await CreateService(new TestWorkspaceProvider(workspace)).TextSearchAsync(
+            new TextSearchRequest("ChildHasRecords", IsRegex: isRegex, PageSize: 60), timeout.Token);
+
+        Assert.True(result.IsSuccess, result.Error?.Message);
+        Assert.EndsWith("Available.cs", Assert.Single(result.Value!.Matches.Items).FilePath);
+        GC.KeepAlive(cachedText);
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // 7. TextSearch_CaseSensitive
     // ────────────────────────────────────────────────────────────────────
