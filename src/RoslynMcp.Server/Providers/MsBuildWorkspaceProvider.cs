@@ -80,7 +80,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
         if (string.IsNullOrWhiteSpace(solutionPath))
         {
             logger.Information("No solution selected at startup; waiting for set_solution_root or set_solution_path");
-            return new MsBuildWorkspaceProvider(MSBuildWorkspace.Create(), string.Empty, string.Empty, logger);
+            return new MsBuildWorkspaceProvider(MSBuildWorkspace.Create(ShadowCopyAnalyzerService.Host), string.Empty, string.Empty, logger);
         }
 
         var fullPath = Path.GetFullPath(solutionPath);
@@ -88,7 +88,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             throw new FileNotFoundException($"Solution not found: {fullPath}");
 
         var solutionDir = Path.GetDirectoryName(fullPath)!;
-        var workspace = MSBuildWorkspace.Create();
+        var workspace = MSBuildWorkspace.Create(ShadowCopyAnalyzerService.Host);
         var provider = new MsBuildWorkspaceProvider(workspace, solutionDir, fullPath, logger);
         try
         {
@@ -290,7 +290,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             var structuralPending = _structuralChangePending;
             var newSolutionDir = Path.GetDirectoryName(fullPath)!;
             var solutionDirectoryChanged = !PathsEqual(_solutionDir, newSolutionDir);
-            newWorkspace = MSBuildWorkspace.Create();
+            newWorkspace = MSBuildWorkspace.Create(ShadowCopyAnalyzerService.Host);
 
             _logger.Information("Switching solution to: {SolutionPath}", fullPath);
 
@@ -644,7 +644,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
 
                 // Swap in an empty workspace rather than nulling the field: every public member
                 // already guards on _initialized, so this keeps the existing null semantics.
-                _workspace = MSBuildWorkspace.Create();
+                _workspace = MSBuildWorkspace.Create(ShadowCopyAnalyzerService.Host);
                 _documentCache = new ConcurrentDictionary<string, DocumentId>(StringComparer.OrdinalIgnoreCase);
                 _initialized = false;
             }
