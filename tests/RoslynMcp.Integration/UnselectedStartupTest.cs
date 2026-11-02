@@ -99,6 +99,46 @@ public sealed class UnselectedStartupTest : IDisposable
     }
 
     [Fact]
+    public async Task SelectorCalledWithoutItsArgumentNamesTheMissingParameter()
+    {
+        var emptyRepo = Path.Combine(_sandbox, "no-solution");
+        Directory.CreateDirectory(Path.Combine(emptyRepo, ".git"));
+
+        var serverExe = FindServerExe(FindSolutionDir());
+        Assert.True(File.Exists(serverExe), $"Server exe not found: {serverExe}. Run 'dotnet build' first.");
+
+        using var server = StartServer(serverExe, emptyRepo);
+        var stderr = server.StandardError.ReadToEndAsync();
+
+        try
+        {
+            await SendRequestAsync(server, 1, "initialize", new
+            {
+                protocolVersion = "2024-11-05",
+                capabilities = new { },
+                clientInfo = new { name = "missing-argument-test", version = "1.0.0" }
+            }, 120_000);
+            await SendNotificationAsync(server, "notifications/initialized");
+
+            var response = await SendRequestAsync(server, 2, "tools/call", new
+            {
+                name = "set_solution_root",
+                arguments = new { }
+            }, 30_000);
+            var result = response.GetProperty("result");
+            Assert.True(result.GetProperty("isError").GetBoolean());
+            var text = result.GetProperty("content")[0].GetProperty("text").GetString();
+            Assert.Contains("MISSING_ARGUMENT", text);
+            Assert.Contains("rootPath", text);
+        }
+        finally
+        {
+            await StopServerAsync(server);
+            await stderr;
+        }
+    }
+
+    [Fact]
     public async Task ObsoleteBootstrapVariableDoesNotSelectASolution()
     {
         var emptyRepo = Path.Combine(_sandbox, "no-solution");

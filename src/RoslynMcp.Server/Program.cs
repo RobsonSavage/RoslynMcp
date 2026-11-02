@@ -268,7 +268,17 @@ try
                 if (needsWorkspace)
                     await workspaceProvider.SyncPendingChangesAsync(ct);
 
-                return await next(context, ct);
+                try
+                {
+                    return await next(context, ct);
+                }
+                // The SDK throws this from argument binding when a required parameter is absent, and the
+                // client only sees a generic failure. Name the parameter so the caller can correct the call.
+                catch (ArgumentException ex) when (ex.Message.Contains("missing a value for the required parameter", StringComparison.Ordinal))
+                {
+                    logger.Warning("{Tool} called without a required argument: {Detail}", toolName, ex.Message);
+                    return toolResultMapper.Error($"{toolName}: {ex.Message.Split('(')[0].Trim()}", "MISSING_ARGUMENT");
+                }
             }
             finally
             {
