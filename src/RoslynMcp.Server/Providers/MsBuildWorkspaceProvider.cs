@@ -408,6 +408,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
             watcher.Filters.Add("*.cs");
             foreach (var buildFile in s_buildFileExtensions)
                 watcher.Filters.Add("*" + buildFile);
+            watcher.Filters.Add(RestoreAssetsFileName);
 
             watcher.Changed += OnFileChanged;
             watcher.Created += OnFileStructuralChange;
@@ -488,6 +489,13 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
 
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
+        if (IsRestoreOutput(e.FullPath))
+        {
+            // A restore after load supplies the package references the design-time build lacked.
+            _structuralChangePending = true;
+            return;
+        }
+
         if (IsIgnored(e.FullPath)) return;
 
         if (IsBuildFile(e.FullPath))
@@ -509,7 +517,7 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
 
     private void OnFileStructuralChange(object sender, FileSystemEventArgs e)
     {
-        if (IsIgnored(e.FullPath)) return;
+        if (IsIgnored(e.FullPath) && !IsRestoreOutput(e.FullPath)) return;
         _structuralChangePending = true;
     }
 
@@ -522,6 +530,11 @@ public sealed class MsBuildWorkspaceProvider : IWorkspaceProvider, IAsyncDisposa
 
     private static readonly string[] s_buildFileExtensions =
         [".csproj", ".props", ".targets", ".sln", ".slnx"];
+
+    private const string RestoreAssetsFileName = "project.assets.json";
+
+    private static bool IsRestoreOutput(string fullPath) =>
+        string.Equals(Path.GetFileName(fullPath), RestoreAssetsFileName, StringComparison.OrdinalIgnoreCase);
 
     private static bool IsBuildFile(string fullPath)
     {

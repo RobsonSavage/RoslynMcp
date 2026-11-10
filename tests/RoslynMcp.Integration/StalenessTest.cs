@@ -100,4 +100,45 @@ public sealed class StalenessTest
             await File.WriteAllTextAsync(probe, original);
         }
     }
+
+    /// <summary>
+    /// A worktree selected before its first restore loads without package references. The restore
+    /// writes obj\project.assets.json, which must reload the solution although obj\ is ignored.
+    /// </summary>
+    [Fact]
+    public async Task RestoreOutputReloadsTheSolution()
+    {
+        EnsureMsBuildRegistered();
+        var root = FindRepoRoot();
+        var logger = new LoggerConfiguration().MinimumLevel.Error().CreateLogger();
+
+        var assets = Path.Combine(root, "src", "RoslynMcp.Shared", "obj", "project.assets.json");
+        Assert.True(File.Exists(assets), $"restore output missing: {assets}");
+
+        await using var provider = await MsBuildWorkspaceProvider.CreateAsync(
+            Path.Combine(root, "RoslynMcp.sln"), logger);
+
+        // ProjectId is a fresh GUID on every load, so a changed id proves a reload happened.
+        var before = provider.CurrentSolution!.ProjectIds.First().Id;
+        provider.StartFileWatcher();
+
+        // A changed write time is what a restore produces; the content stays untouched.
+        File.SetLastWriteTimeUtc(assets, DateTime.UtcNow);
+
+        var reloaded = false;
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < deadline)
+        {
+            await provider.SyncPendingChangesAsync();
+            if (!provider.CurrentSolution!.ProjectIds.Any(id => id.Id == before))
+            {
+                reloaded = true;
+                break;
+            }
+
+            await Task.Delay(100);
+        }
+
+        Assert.True(reloaded, "writing project.assets.json did not reload the solution");
+    }
 }
